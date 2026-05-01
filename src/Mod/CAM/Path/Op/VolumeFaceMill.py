@@ -17,7 +17,11 @@ Part = LazyLoader("Part", globals(), "Part")
 __title__ = "CAM Volume Face Mill Operation"
 __author__ = "OpenAI Codex"
 __url__ = "https://www.freecad.org"
-__doc__ = "Class and implementation of stock-aware Volume Face Mill operation."
+__doc__ = (
+    "Class and implementation of stock-aware Volume Face Mill operation. "
+    "The operation is Job/world-Z oriented; operation placement does not rotate "
+    "the stock-derived machining volume."
+)
 
 
 if False:
@@ -314,6 +318,23 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         VolumeFaceMillUtils.set_distance_property(obj, prop_name, 0.0)
         return 0.0
 
+    def _safe_allowance_pair_value(self, obj, xy_prop, z_prop):
+        """Return the safe canonical value for a linked XY/Z allowance pair."""
+
+        xy_value = self._distance_property_value(obj, xy_prop)
+        z_value = self._distance_property_value(obj, z_prop)
+        values = [value for value in (xy_value, z_value) if value is not None]
+        if not values:
+            return 0.0
+        return max(0.0, max(values))
+
+    def _sync_allowance_pair_to_linked(self, obj, xy_prop, z_prop):
+        """Force both properties in a linked allowance pair to one safe value."""
+
+        value = self._safe_allowance_pair_value(obj, xy_prop, z_prop)
+        VolumeFaceMillUtils.set_distance_property(obj, xy_prop, value)
+        VolumeFaceMillUtils.set_distance_property(obj, z_prop, value)
+
     def _sync_linked_allowance(self, obj, changed_prop, mode_prop, xy_prop, z_prop):
         """Synchronize XY and Z allowance values when the group is in Linked mode."""
 
@@ -334,7 +355,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         VolumeFaceMillUtils.set_distance_property(obj, target_prop, value)
 
     def _handle_allowance_property_change(self, obj, prop):
-        """Apply Stage 2 linked-mode synchronization and non-negative clamping."""
+        """Apply linked-mode synchronization and non-negative clamping."""
 
         self._ensure_runtime_state()
 
@@ -350,6 +371,8 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 if prop == mode_prop:
                     self._clamp_allowance_non_negative(obj, xy_prop)
                     self._clamp_allowance_non_negative(obj, z_prop)
+                    if getattr(obj, mode_prop, None) == _ALLOWANCE_MODE_DEFAULT:
+                        self._sync_allowance_pair_to_linked(obj, xy_prop, z_prop)
                 else:
                     self._clamp_allowance_non_negative(obj, prop)
                     self._sync_linked_allowance(obj, prop, mode_prop, xy_prop, z_prop)
@@ -441,6 +464,28 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         finally:
             self._syncing_depths = False
 
+    def _setBaseAndStock(self, obj, ignoreErrors=False):
+        """Set Job, model, and stock references while allowing stock-only Jobs."""
+
+        job = PathUtils.findParentJob(obj)
+        if not job:
+            if not ignoreErrors:
+                Path.Log.error(translate("CAM", "No parent job found for operation."))
+            return False
+
+        stock = getattr(job, "Stock", None)
+        if stock is None:
+            if not ignoreErrors:
+                Path.Log.error(
+                    translate("CAM_VolumeFaceMill", "Volume Face Mill requires a valid Job stock.")
+                )
+            return False
+
+        self.job = job
+        self.model = job.Model.Group if getattr(job, "Model", None) else []
+        self.stock = stock
+        return True
+
     def _recommended_safe_travel_height(self, obj, model):
         """Return the creation-time safe travel height for Volume Face Mill."""
 
@@ -470,6 +515,22 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         VolumeFaceMillUtils.set_distance_property(obj, "SafeHeight", safe_height)
         VolumeFaceMillUtils.set_distance_property(obj, "ClearanceHeight", safe_height)
         return True
+
+    def _clamp_stepover(self, obj):
+        """Clamp StepOver to the valid UI-supported percentage range."""
+
+        if not hasattr(obj, "StepOver"):
+            return
+
+        try:
+            value = float(obj.StepOver)
+        except Exception:
+            return
+
+        clamped = min(100.0, max(1.0, value))
+        if not Path.Geom.isRoughly(value, clamped):
+            Path.Log.warning("StepOver must be between 1 and 100 percent; clamping.")
+            obj.StepOver = int(clamped) if clamped.is_integer() else clamped
 
     def _abort_no_path(self, obj, message, error=False, preserve_removalshape=False):
         """Clear generated state and abort with no path."""
@@ -642,11 +703,19 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                     continue
                 seen.add(rounded)
 
+                saved_end_vector = self.endVector
                 self.depthparams = [candidate_depth]
-                pp, sim = self._buildPathArea(obj, shape, is_hole, start, getsim)
-                z_levels = self._cutting_z_levels_from_commands(pp.Commands)
+                try:
+                    pp, sim = self._buildPathArea(obj, shape, is_hole, start, getsim)
+                    z_levels = self._cutting_z_levels_from_commands(pp.Commands)
+                except Exception:
+                    self.endVector = saved_end_vector
+                    raise
+
                 if z_levels:
                     return candidate_depth, pp, sim, z_levels
+
+                self.endVector = saved_end_vector
         finally:
             self.depthparams = saved_depthparams
 
@@ -657,6 +726,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         Path.Log.track()
         self._force_compatibility_properties(obj)
+        self._clamp_stepover(obj)
 
         if not VolumeFaceMillUtils.has_valid_stock(obj):
             return self._abort_no_path(
@@ -733,8 +803,8 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         Path.Log.track(prop)
         self._ensure_runtime_state()
 
-        if prop == "StepOver" and obj.StepOver == 0:
-            obj.StepOver = 1
+        if prop == "StepOver":
+            self._clamp_stepover(obj)
 
         if prop == "OptimizationMode":
             obj.MinTravel = obj.OptimizationMode == "MinTravel"
@@ -754,14 +824,17 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         super().areaOpOnChanged(obj, prop)
 
     def updateDepths(self, obj, ignoreErrors=False):
-        """Short-circuit base depth updates when Job stock is missing."""
+        """Synchronize Volume Face Mill depths from Job stock and selected targets."""
 
-        if not VolumeFaceMillUtils.has_valid_stock(obj):
-            del ignoreErrors
+        if not self._setBaseAndStock(obj, ignoreErrors):
             obj.removalshape = Part.Shape()
             return False
 
-        return super().updateDepths(obj, ignoreErrors)
+        if not VolumeFaceMillUtils.has_valid_stock(obj):
+            obj.removalshape = Part.Shape()
+            return False
+
+        return self._sync_stock_depths(obj)
 
     def opUpdateDepths(self, obj):
         """Keep Volume Face Mill depth targets stock-aware."""

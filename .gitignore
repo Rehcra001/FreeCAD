@@ -77,3 +77,6 @@ tsupdate_stdout.log
 /local_plans/volume_face_mill_refactor_plan.md
 /local_plans/volume_face_mill_allowance_implementation_plan.md
 /local_plans/volume_face_mill_allowance_stage_plan.md
+
+# local debug artifacts
+/temp_debug/

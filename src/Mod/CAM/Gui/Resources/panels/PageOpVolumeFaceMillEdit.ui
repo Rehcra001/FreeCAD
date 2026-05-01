@@ -76,14 +76,14 @@
       <item row="0" column="1">
        <widget class="QComboBox" name="optimizationMode">
         <property name="toolTip">
-         <string>Select optional travel-reduction behavior. This does not change protected model geometry.</string>
+         <string>Select optional travel-reduction behavior. Volume Face Mill is stock/world-Z oriented; operation placement or workplane rotation does not rotate the stock-derived machining volume.</string>
         </property>
        </widget>
       </item>
       <item row="1" column="0" colspan="2">
        <widget class="QCheckBox" name="protectSelectedFeatures">
          <property name="toolTip">
-          <string>Protect selected non-target geometry as additional keepout. The lowest selected horizontal face sets the final depth. Selected geometry does not redefine the stock boundary.</string>
+          <string>Protect selected non-target geometry as additional keepout. The lowest selected horizontal face sets the final depth. Selected geometry does not redefine the stock boundary. Target detection uses Job/world Z.</string>
          </property>
         <property name="text">
          <string>Protect selected geometry</string>
@@ -93,7 +93,7 @@
       <item row="2" column="0" colspan="2">
        <widget class="QCheckBox" name="clearEdges">
          <property name="toolTip">
-          <string>Volume Face Mill uses the Job stock extents as its machining boundary. Allow the tool center to overhang those stock exterior edges so they can be fully cleared.</string>
+          <string>Volume Face Mill uses the Job stock extents as its machining boundary in Job/world XY. Allow the tool center to overhang those stock exterior edges so they can be fully cleared.</string>
          </property>
         <property name="text">
          <string>Clear stock edges</string>
@@ -241,7 +241,7 @@
       <item row="0" column="1">
        <widget class="QComboBox" name="featureAllowanceMode">
         <property name="toolTip">
-         <string>Linked edits one value for both XY and Z feature allowance. Independent edits XY and Z separately. Allowance directions use job/world axes, and separate X and Y values are not supported in this phase.</string>
+         <string>Linked edits one value for both XY and Z feature allowance. Independent edits XY and Z separately. Allowance directions use job/world axes, and separate X and Y values are not supported in this phase. Operation placement or workplane rotation does not rotate these allowance directions.</string>
         </property>
        </widget>
       </item>
@@ -327,7 +327,7 @@
       <item row="0" column="1">
        <widget class="QComboBox" name="stockAllowanceMode">
         <property name="toolTip">
-         <string>Linked edits one value for both XY and Z stock allowance. Independent edits XY and Z separately. Allowance directions use job/world axes, and separate X and Y values are not supported in this phase.</string>
+         <string>Linked edits one value for both XY and Z stock allowance. Independent edits XY and Z separately. Allowance directions use job/world axes, and separate X and Y values are not supported in this phase. Operation placement or workplane rotation does not rotate these allowance directions.</string>
         </property>
        </widget>
       </item>

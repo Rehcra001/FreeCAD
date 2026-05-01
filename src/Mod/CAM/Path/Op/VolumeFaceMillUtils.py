@@ -100,7 +100,11 @@ def is_horizontal_face(face, tolerance=1e-6):
         return False
 
     try:
-        normal = face.normalAt(0, 0)
+        u_min, u_max, v_min, v_max = face.ParameterRange
+        normal = face.normalAt(
+            0.5 * (u_min + u_max),
+            0.5 * (v_min + v_max),
+        )
     except Exception:
         return False
 
@@ -124,6 +128,12 @@ def selected_horizontal_faces(obj):
             horizontal_faces.append(shape)
 
     return horizontal_faces
+
+
+def has_selected_geometry(obj):
+    """Return whether the operation has any readable selected base geometry."""
+
+    return any(True for _selected in iter_selected_subobjects(obj))
 
 
 def allowance_distance_value(obj, prop_name):
@@ -164,6 +174,7 @@ def resolve_target_faces_and_final_depth(obj, stock_shape, tolerance=1e-6):
     """Return (target_faces, final_depth) from Base selection and stock extents."""
 
     stock_bb = stock_shape.BoundBox
+    has_selection = has_selected_geometry(obj)
     horizontal_faces = selected_horizontal_faces(obj)
     allowances = allowance_values(obj)
 
@@ -176,6 +187,10 @@ def resolve_target_faces_and_final_depth(obj, stock_shape, tolerance=1e-6):
         ]
         final_depth = lowest_z + allowances["feature_z"]
     else:
+        if has_selection:
+            Path.Log.warning(
+                "No selected horizontal target face found; final depth defaults to stock bottom."
+            )
         target_faces = []
         final_depth = stock_bb.ZMin + allowances["stock_z"]
 

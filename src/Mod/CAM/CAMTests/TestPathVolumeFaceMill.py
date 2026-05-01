@@ -9,6 +9,7 @@ from unittest import mock
 
 import FreeCAD
 import Part
+import Path
 import Path.Main.Job as PathJob
 import Path.Main.Stock as PathStock
 import Path.Op.VolumeFaceMill as PathVolumeFaceMill
@@ -123,6 +124,21 @@ class TestPathVolumeFaceMill(PathTestBase):
         job.Stock = self._make_stock(job)
         self.assertSuccessfulRecompute(self.doc)
         return job, model
+
+    def _make_stock_only_job(self):
+        """Create a Job with valid stock and no model geometry."""
+
+        try:
+            job = PathJob.Create("JobStockOnly", [], None)
+        except Exception:
+            temp_model = self._make_model_with_boss()
+            job = PathJob.Create("JobStockOnly", [temp_model], None)
+            job.Model.Group = []
+
+        job.GeometryTolerance.Value = 0.001
+        job.Stock = self._make_stock(job)
+        self.assertSuccessfulRecompute(self.doc)
+        return job
 
     def _make_job_without_stock(self):
         model = self._make_model_with_boss()
@@ -556,6 +572,23 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertTrue(op.removalshape.isNull())
         self.assertEqual(len(self._cutting_moves(op.Path)), 0)
 
+    def test_stock_only_job_generates_stock_facing_path(self):
+        job = self._make_stock_only_job()
+        op = PathVolumeFaceMill.Create("stock_only_volume_face_mill", parentJob=job)
+        op.Label = "stock_only_volume_face_mill"
+        self._configure_tool(op)
+        op.Base = []
+
+        self.assertSuccessfulRecompute(self.doc, op)
+        self._set_stepdown_and_heights(op, 5.0)
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        cutting_moves = self._cutting_moves(op.Path)
+        self.assertGreater(len(cutting_moves), 0)
+        self.assertFalse(op.removalshape.isNull())
+        self.assertAlmostEqual(op.OpStartDepth.Value, job.Stock.Shape.BoundBox.ZMax, places=6)
+        self.assertAlmostEqual(op.OpFinalDepth.Value, job.Stock.Shape.BoundBox.ZMin, places=6)
+
     def test_model_protection_is_always_on(self):
         job, model, op = self._create_operation(
             name="model_protection_always_on",
@@ -963,41 +996,41 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertAlmostEqual(op.StockAllowanceXY.Value, 1.5, places=6)
         self.assertAlmostEqual(op.StockAllowanceZ.Value, 1.5, places=6)
 
-    def test_independent_feature_allowance_preserves_distinct_values_until_linked_edit(self):
-        _job, _model, op = self._create_operation(name="independent_feature_allowance")
+    def test_feature_allowance_switching_to_linked_synchronizes_xy_z_to_safe_value(self):
+        _job, _model, op = self._create_operation(name="feature_allowance_link_sync")
 
         self._set_allowance_mode(op, "FeatureAllowanceMode", "Independent")
         self._set_allowance_distance(op, "FeatureAllowanceXY", 1.0)
-        self._set_allowance_distance(op, "FeatureAllowanceZ", 2.5)
-
-        self.assertAlmostEqual(op.FeatureAllowanceXY.Value, 1.0, places=6)
-        self.assertAlmostEqual(op.FeatureAllowanceZ.Value, 2.5, places=6)
+        self._set_allowance_distance(op, "FeatureAllowanceZ", 5.0)
 
         self._set_allowance_mode(op, "FeatureAllowanceMode", "Linked")
-        self.assertAlmostEqual(op.FeatureAllowanceXY.Value, 1.0, places=6)
-        self.assertAlmostEqual(op.FeatureAllowanceZ.Value, 2.5, places=6)
+        self.assertAlmostEqual(op.FeatureAllowanceXY.Value, 5.0, places=6)
+        self.assertAlmostEqual(op.FeatureAllowanceZ.Value, 5.0, places=6)
 
-        self._set_allowance_distance(op, "FeatureAllowanceXY", 3.0)
-        self.assertAlmostEqual(op.FeatureAllowanceXY.Value, 3.0, places=6)
-        self.assertAlmostEqual(op.FeatureAllowanceZ.Value, 3.0, places=6)
-
-    def test_independent_stock_allowance_preserves_distinct_values_until_linked_edit(self):
-        _job, _model, op = self._create_operation(name="independent_stock_allowance")
+    def test_stock_allowance_switching_to_linked_synchronizes_xy_z_to_safe_value(self):
+        _job, _model, op = self._create_operation(name="stock_allowance_link_sync")
 
         self._set_allowance_mode(op, "StockAllowanceMode", "Independent")
-        self._set_allowance_distance(op, "StockAllowanceXY", 1.25)
-        self._set_allowance_distance(op, "StockAllowanceZ", 0.5)
-
-        self.assertAlmostEqual(op.StockAllowanceXY.Value, 1.25, places=6)
-        self.assertAlmostEqual(op.StockAllowanceZ.Value, 0.5, places=6)
+        self._set_allowance_distance(op, "StockAllowanceXY", 2.0)
+        self._set_allowance_distance(op, "StockAllowanceZ", 7.0)
 
         self._set_allowance_mode(op, "StockAllowanceMode", "Linked")
-        self.assertAlmostEqual(op.StockAllowanceXY.Value, 1.25, places=6)
-        self.assertAlmostEqual(op.StockAllowanceZ.Value, 0.5, places=6)
+        self.assertAlmostEqual(op.StockAllowanceXY.Value, 7.0, places=6)
+        self.assertAlmostEqual(op.StockAllowanceZ.Value, 7.0, places=6)
 
-        self._set_allowance_distance(op, "StockAllowanceZ", 2.0)
-        self.assertAlmostEqual(op.StockAllowanceXY.Value, 2.0, places=6)
-        self.assertAlmostEqual(op.StockAllowanceZ.Value, 2.0, places=6)
+    def test_switching_to_linked_clamps_negative_allowances_before_sync(self):
+        _job, _model, op = self._create_operation(name="linked_negative_allowance_clamp")
+
+        self._set_allowance_mode(op, "FeatureAllowanceMode", "Independent")
+        op.setExpression("FeatureAllowanceXY", None)
+        op.setExpression("FeatureAllowanceZ", None)
+        op.FeatureAllowanceXY.Value = -2.0
+        op.FeatureAllowanceZ.Value = 3.0
+
+        self._set_allowance_mode(op, "FeatureAllowanceMode", "Linked")
+
+        self.assertAlmostEqual(op.FeatureAllowanceXY.Value, 3.0, places=6)
+        self.assertAlmostEqual(op.FeatureAllowanceZ.Value, 3.0, places=6)
 
     def test_negative_allowances_are_clamped_non_negative(self):
         _job, _model, op = self._create_operation(name="negative_allowance_clamp")
@@ -1059,19 +1092,29 @@ class TestPathVolumeFaceMill(PathTestBase):
 
         self.assertIn("job/world axes", tooltips["featureAllowanceMode"])
         self.assertIn("not supported in this phase", tooltips["featureAllowanceMode"])
+        self.assertIn(
+            "Operation placement or workplane rotation does not rotate these allowance directions.",
+            tooltips["featureAllowanceMode"],
+        )
         self.assertIn("job/world XY plane", tooltips["featureAllowanceXY"])
         self.assertIn("job/world +Z axis", tooltips["featureAllowanceZ"])
         self.assertIn("job/world axes", tooltips["stockAllowanceMode"])
         self.assertIn("not supported in this phase", tooltips["stockAllowanceMode"])
-        self.assertIn("job/world XY stock boundary", tooltips["stockAllowanceXY"])
         self.assertIn(
-            "Volume Face Mill uses the Job stock extents as its machining boundary.",
+            "Operation placement or workplane rotation does not rotate these allowance directions.",
+            tooltips["stockAllowanceMode"],
+        )
+        self.assertIn("job/world XY stock boundary", tooltips["stockAllowanceXY"])
+        self.assertIn("stock/world-Z oriented", tooltips["optimizationMode"])
+        self.assertIn(
+            "Volume Face Mill uses the Job stock extents as its machining boundary in Job/world XY.",
             tooltips["clearEdges"],
         )
         self.assertIn(
             "Selected geometry does not redefine the stock boundary.",
             tooltips["protectSelectedFeatures"],
         )
+        self.assertIn("Target detection uses Job/world Z.", tooltips["protectSelectedFeatures"])
 
     def test_allowance_gui_controller_linked_mode_writes_xy_and_z_and_hides_independent_fields(
         self,
@@ -1152,7 +1195,7 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertFalse(controller.form.stockAllowanceLinkedFrame.visible)
         self.assertTrue(controller.form.stockAllowanceIndependentFrame.visible)
 
-    def test_allowance_gui_controller_switching_to_linked_preserves_values_until_edit(self):
+    def test_allowance_gui_controller_switching_to_linked_synchronizes_to_safe_value(self):
         _job, _model, op = self._create_operation(name="allowance_gui_mode_switch")
         self._set_allowance_mode(op, "FeatureAllowanceMode", "Independent")
         self._set_allowance_mode(op, "StockAllowanceMode", "Independent")
@@ -1182,10 +1225,10 @@ class TestPathVolumeFaceMill(PathTestBase):
         controller._update_allowance_properties_from_form(op)
         self.assertEqual(op.FeatureAllowanceMode, "Linked")
         self.assertEqual(op.StockAllowanceMode, "Linked")
-        self.assertAlmostEqual(op.FeatureAllowanceXY.Value, 1.0, places=6)
+        self.assertAlmostEqual(op.FeatureAllowanceXY.Value, 2.5, places=6)
         self.assertAlmostEqual(op.FeatureAllowanceZ.Value, 2.5, places=6)
         self.assertAlmostEqual(op.StockAllowanceXY.Value, 1.25, places=6)
-        self.assertAlmostEqual(op.StockAllowanceZ.Value, 0.5, places=6)
+        self.assertAlmostEqual(op.StockAllowanceZ.Value, 1.25, places=6)
 
         controller.form.featureAllowanceLinked.value = 3.5
         controller.form.stockAllowanceLinked.value = 0.75
@@ -1194,6 +1237,20 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertAlmostEqual(op.FeatureAllowanceZ.Value, 3.5, places=6)
         self.assertAlmostEqual(op.StockAllowanceXY.Value, 0.75, places=6)
         self.assertAlmostEqual(op.StockAllowanceZ.Value, 0.75, places=6)
+
+    def test_gui_update_data_does_not_refresh_while_applying_form_fields(self):
+        module = self._load_headless_volume_face_mill_gui_module()
+        page = module.TaskPanelOpPage.__new__(module.TaskPanelOpPage)
+        page._applying_form_fields = True
+        calls = []
+
+        def fake_set_fields(_obj):
+            calls.append("setFields")
+
+        page.setFields = fake_set_fields
+        page.updateData(object(), "FeatureAllowanceXY")
+
+        self.assertEqual(calls, [])
 
     def test_selected_target_face_depth_honors_feature_allowance_z(self):
         job, model = self._make_job_with_stock_and_model()
@@ -1247,6 +1304,105 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertAlmostEqual(op.OpFinalDepth.Value, 10.0, places=6)
         self.assertAlmostEqual(op.FinalDepth.Value, 10.0, places=6)
         self._assert_has_z_level(self._cutting_z_levels(self._cutting_moves(op.Path)), 10.0)
+
+    def test_translated_horizontal_face_sets_final_depth(self):
+        job, model = self._make_job_with_stock_and_model()
+        target = self._make_aux_box(
+            "TranslatedTargetFace",
+            FreeCAD.Vector(23.5, 41.25, 0.0),
+            FreeCAD.Vector(17.0, 13.0, 8.0),
+        )
+        target_top = self._highest_horizontal_face_name(target.Shape)
+
+        _job, _model, op = self._create_operation(
+            name="translated_horizontal_face_depth",
+            job=job,
+            model=model,
+            base=[(target, [target_top])],
+            step_down=4.0,
+        )
+
+        self.assertAlmostEqual(op.OpFinalDepth.Value, 8.0, places=6)
+        self.assertAlmostEqual(op.FinalDepth.Value, 8.0, places=6)
+
+    def test_is_horizontal_face_uses_face_parameter_midpoint(self):
+        shape = Part.makeBox(17.0, 13.0, 8.0, FreeCAD.Vector(23.5, 41.25, 0.0))
+        horizontal_faces = [
+            face for face in shape.Faces if abs(face.BoundBox.ZMax - face.BoundBox.ZMin) <= 1e-6
+        ]
+
+        self.assertGreaterEqual(len(horizontal_faces), 2)
+        for face in horizontal_faces:
+            self.assertTrue(PathVolumeFaceMillUtils.is_horizontal_face(face))
+
+    def test_selected_vertical_geometry_is_detected_as_selection_without_target_face(self):
+        job, model = self._make_job_with_stock_and_model()
+        _job, _model, op = self._create_operation(
+            name="vertical_selection_detected",
+            job=job,
+            model=model,
+            base=[(model, self._vertical_face_names(model.Shape))],
+        )
+
+        self.assertTrue(PathVolumeFaceMillUtils.has_selected_geometry(op))
+        self.assertEqual(PathVolumeFaceMillUtils.selected_horizontal_faces(op), [])
+        self.assertAlmostEqual(op.OpFinalDepth.Value, job.Stock.Shape.BoundBox.ZMin, places=6)
+
+    def test_stepover_is_clamped_for_programmatic_values(self):
+        _job, _model, op = self._create_operation(name="programmatic_stepover_clamp")
+
+        op.StepOver = -10
+        op.Proxy.areaOpOnChanged(op, "StepOver")
+        self.assertAlmostEqual(float(op.StepOver), 1.0, places=6)
+
+        op.StepOver = 0
+        op.Proxy.areaOpOnChanged(op, "StepOver")
+        self.assertAlmostEqual(float(op.StepOver), 1.0, places=6)
+
+        op.StepOver = 250
+        op.Proxy.areaOpOnChanged(op, "StepOver")
+        self.assertAlmostEqual(float(op.StepOver), 100.0, places=6)
+
+    def test_failed_depth_candidate_does_not_leak_end_vector(self):
+        _job, _model, op = self._create_operation(name="depth_candidate_endvector_guard")
+        proxy = op.Proxy
+        original_end_vector = FreeCAD.Vector(1.0, 2.0, 3.0)
+        proxy.endVector = original_end_vector
+        proxy.depthparams = []
+
+        empty_path = Path.Path([])
+        good_path = Path.Path(
+            [
+                Path.Command("G1", {"X": 1.0, "Y": 1.0, "Z": 4.0}),
+            ]
+        )
+
+        def fake_build_path_area(_obj, _shape, _is_hole, _start, _getsim):
+            if proxy.depthparams == [3.0]:
+                proxy.endVector = FreeCAD.Vector(99.0, 99.0, 99.0)
+                return empty_path, None
+
+            proxy.endVector = FreeCAD.Vector(10.0, 20.0, 4.0)
+            return good_path, None
+
+        shape = Part.makeBox(10, 10, 10)
+        with mock.patch.object(proxy, "_buildPathArea", side_effect=fake_build_path_area):
+            depth, pp, sim, z_levels = proxy._build_path_for_depth_candidates(
+                op,
+                shape,
+                False,
+                None,
+                False,
+                [3.0, 4.0],
+            )
+
+        self.assertAlmostEqual(depth, 4.0, places=6)
+        self.assertIs(pp, good_path)
+        self.assertIsNone(sim)
+        self.assertEqual(z_levels, [4.0])
+        self.assertAlmostEqual(proxy.endVector.x, 10.0, places=6)
+        self.assertAlmostEqual(proxy.endVector.y, 20.0, places=6)
+        self.assertAlmostEqual(proxy.endVector.z, 4.0, places=6)
 
     def test_clear_edges_true_keeps_final_pass_when_stock_above_target_face_is_25mm(self):
         job, model = self._make_job_with_25mm_stock_above_model()

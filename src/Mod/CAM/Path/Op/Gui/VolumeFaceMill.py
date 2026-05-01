@@ -69,6 +69,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             obj,
             "StockAllowanceZ",
         )
+        self._applying_form_fields = False
 
     def getForm(self):
         Path.Log.track()
@@ -160,34 +161,38 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
     def getFields(self, obj):
         """Set operation object values from the task panel."""
 
-        self.updateToolController(obj, self.form.toolController)
-        self.updateCoolant(obj, self.form.coolantController)
+        self._applying_form_fields = True
+        try:
+            self.updateToolController(obj, self.form.toolController)
+            self.updateCoolant(obj, self.form.coolantController)
 
-        if obj.CutMode != str(self.form.cutMode.currentData()):
-            obj.CutMode = str(self.form.cutMode.currentData())
+            if obj.CutMode != str(self.form.cutMode.currentData()):
+                obj.CutMode = str(self.form.cutMode.currentData())
 
-        if obj.ClearingPattern != str(self.form.clearingPattern.currentData()):
-            obj.ClearingPattern = str(self.form.clearingPattern.currentData())
+            if obj.ClearingPattern != str(self.form.clearingPattern.currentData()):
+                obj.ClearingPattern = str(self.form.clearingPattern.currentData())
 
-        if obj.OptimizationMode != str(self.form.optimizationMode.currentData()):
-            obj.OptimizationMode = str(self.form.optimizationMode.currentData())
+            if obj.OptimizationMode != str(self.form.optimizationMode.currentData()):
+                obj.OptimizationMode = str(self.form.optimizationMode.currentData())
 
-        if obj.StepOver != self.form.stepOverPercent.value():
-            obj.StepOver = self.form.stepOverPercent.value()
+            if obj.StepOver != self.form.stepOverPercent.value():
+                obj.StepOver = self.form.stepOverPercent.value()
 
-        PathGuiUtil.updateInputField(obj, "ExtraOffset", self.form.extraOffset)
-        self._update_angle(obj)
+            PathGuiUtil.updateInputField(obj, "ExtraOffset", self.form.extraOffset)
+            self._update_angle(obj)
 
-        if obj.ProtectSelectedFeatures != self.form.protectSelectedFeatures.isChecked():
-            obj.ProtectSelectedFeatures = self.form.protectSelectedFeatures.isChecked()
+            if obj.ProtectSelectedFeatures != self.form.protectSelectedFeatures.isChecked():
+                obj.ProtectSelectedFeatures = self.form.protectSelectedFeatures.isChecked()
 
-        if obj.ClearEdges != self.form.clearEdges.isChecked():
-            obj.ClearEdges = self.form.clearEdges.isChecked()
+            if obj.ClearEdges != self.form.clearEdges.isChecked():
+                obj.ClearEdges = self.form.clearEdges.isChecked()
 
-        if obj.UseStartPoint != self.form.useStartPoint.isChecked():
-            obj.UseStartPoint = self.form.useStartPoint.isChecked()
+            if obj.UseStartPoint != self.form.useStartPoint.isChecked():
+                obj.UseStartPoint = self.form.useStartPoint.isChecked()
 
-        self._update_allowance_properties_from_form(obj)
+            self._update_allowance_properties_from_form(obj)
+        finally:
+            self._applying_form_fields = False
 
     def setFields(self, obj):
         """Set task panel values from the operation object."""
@@ -243,6 +248,9 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
 
     def updateData(self, obj, prop):
         """Refresh the page when the edited operation changes."""
+
+        if getattr(self, "_applying_form_fields", False):
+            return
 
         if prop in {
             "Angle",

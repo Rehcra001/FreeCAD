@@ -562,10 +562,63 @@ def build_layer_boundary_volume(
     )
 
 
-def _depth_levels_for_allowance(depthparams, start_depth, final_depth, tolerance=1e-6):
-    """Return descending cut levels used by the current operation."""
+def _iter_horizontal_face_z_values(shape, tolerance=1e-6):
+    """Yield stable Z values for horizontal faces in a shape."""
+
+    if shape is None:
+        return
+
+    for face in getattr(shape, "Faces", []):
+        if is_horizontal_face(face, tolerance=tolerance):
+            yield face_z(face)
+
+
+def _feature_allowance_depth_breakpoints(
+    protected_shapes,
+    start_depth,
+    final_depth,
+    feature_allowance_z,
+    tolerance=1e-6,
+):
+    """Return extra cut depths required by protected feature Z allowance.
+
+    A protected feature with a horizontal top/shelf at Z should create a cut-depth
+    breakpoint at Z + FeatureAllowanceZ. This lets the operation first remove
+    stock down to the allowed top of the feature, then apply XY keepout to deeper
+    layers.
+    """
+
+    allowance_z = max(0.0, float(feature_allowance_z or 0.0))
+    breakpoints = []
+
+    for protected_shape in protected_shapes or []:
+        for z_value in _iter_horizontal_face_z_values(protected_shape, tolerance=tolerance):
+            candidate = float(z_value) + allowance_z
+
+            if candidate <= (final_depth + tolerance):
+                continue
+            if candidate >= (start_depth - tolerance):
+                continue
+
+            breakpoints.append(candidate)
+
+    return breakpoints
+
+
+def _depth_levels_for_allowance(
+    depthparams,
+    start_depth,
+    final_depth,
+    extra_depths=None,
+    tolerance=1e-6,
+):
+    """Return descending cut levels used by the current operation.
+
+    Includes normal operation depth parameters plus allowance-induced breakpoints.
+    """
 
     values = []
+
     if depthparams is not None and hasattr(depthparams, "data"):
         try:
             values.extend(float(value) for value in depthparams.data)
@@ -573,6 +626,8 @@ def _depth_levels_for_allowance(depthparams, start_depth, final_depth, tolerance
             pass
 
     values.extend([float(start_depth), float(final_depth)])
+    values.extend(float(value) for value in (extra_depths or []))
+
     filtered = []
     for value in values:
         if value < (final_depth - tolerance) or value > (start_depth + tolerance):
@@ -580,9 +635,15 @@ def _depth_levels_for_allowance(depthparams, start_depth, final_depth, tolerance
         filtered.append(value)
 
     filtered.sort(reverse=True)
+
     levels = []
     for value in filtered:
-        if not levels or not math.isclose(value, levels[-1], rel_tol=0.0, abs_tol=tolerance):
+        if not levels or not math.isclose(
+            value,
+            levels[-1],
+            rel_tol=0.0,
+            abs_tol=tolerance,
+        ):
             levels.append(value)
 
     return levels
@@ -623,27 +684,47 @@ def _shape_has_section_geometry(shape):
     return False
 
 
-def _protected_slab(protected_shape, stock_shape, layer_top_z, feature_allowance_z, tolerance=1e-6):
-    """Return the protected geometry slab that governs one cutting layer."""
+def _protected_slab(
+    protected_shape,
+    stock_shape,
+    cut_depth_z,
+    feature_allowance_z,
+    tolerance=1e-6,
+):
+    """Return protected geometry that violates allowance at one cut depth.
+
+    A cut at ``cut_depth_z`` is safe over protected geometry whose highest
+    relevant Z is <= ``cut_depth_z - feature_allowance_z``. Geometry exactly at
+    that threshold is allowed. Otherwise the target floor/face that defines the
+    final depth becomes an XY keepout and can consume the whole machining layer.
+
+    Therefore this function clips protected geometry strictly ABOVE the vertical
+    allowance threshold, not in a closed slab including the threshold.
+    """
 
     if shape_is_empty(protected_shape):
         return None
 
     bb = stock_shape.BoundBox
-    if feature_allowance_z <= tolerance:
-        slab_bottom = max(bb.ZMin, layer_top_z - tolerance)
-        slab_top = min(bb.ZMax, layer_top_z + tolerance)
-    else:
-        slab_bottom = max(bb.ZMin, layer_top_z - feature_allowance_z)
-        slab_top = max(min(layer_top_z, bb.ZMax), bb.ZMin)
+    allowance_z = max(0.0, float(feature_allowance_z or 0.0))
+    cut_depth_z = float(cut_depth_z)
 
-    if slab_top < slab_bottom:
-        slab_top, slab_bottom = slab_bottom, slab_top
+    # Only geometry above this threshold violates the requested vertical
+    # allowance for the current cut depth.
+    violation_threshold_z = cut_depth_z - allowance_z
+
+    # Use a strict threshold so the target face/floor exactly at the allowed
+    # clearance does not become a keepout.
+    slab_bottom = max(bb.ZMin, violation_threshold_z + tolerance)
+    slab_top = bb.ZMax
+
+    if slab_top <= slab_bottom + tolerance:
+        return None
 
     slab_box = Part.makeBox(
         bb.XLength,
         bb.YLength,
-        max(slab_top - slab_bottom, tolerance),
+        slab_top - slab_bottom,
         FreeCAD.Vector(bb.XMin, bb.YMin, slab_bottom),
     )
 
@@ -656,7 +737,11 @@ def _protected_slab(protected_shape, stock_shape, layer_top_z, feature_allowance
     if not _shape_has_section_geometry(protected_slab):
         return None
 
-    return protected_slab
+    try:
+        return protected_slab.removeSplitter()
+    except Exception as exc:
+        Path.Log.debug(f"removeSplitter failed for protected allowance slab: {exc}")
+        return protected_slab
 
 
 def _layer_keepout_footprint(protected_slab, stock_shape, feature_allowance_xy):
@@ -677,6 +762,58 @@ def _layer_keepout_footprint(protected_slab, stock_shape, feature_allowance_xy):
         return None
 
     return offset_area
+
+
+def _fallback_keepout_box_from_slab(
+    protected_slab,
+    stock_shape,
+    layer_top_z,
+    layer_bottom_z,
+    feature_allowance_xy,
+    z_margin=0.001,
+    tolerance=1e-6,
+):
+    """Return a conservative rectangular keepout when offset projection fails.
+
+    This fallback is intentionally conservative: it may leave extra stock, but
+    it should not cut into protected geometry. It prevents one failed Path.Area
+    projection from collapsing the entire Feature Allowance operation.
+    """
+
+    if protected_slab is None:
+        return None
+
+    if hasattr(protected_slab, "isNull") and protected_slab.isNull():
+        return None
+
+    stock_bb = stock_shape.BoundBox
+    slab_bb = protected_slab.BoundBox
+    allowance_xy = max(0.0, float(feature_allowance_xy or 0.0))
+
+    x_min = max(stock_bb.XMin, slab_bb.XMin - allowance_xy)
+    x_max = min(stock_bb.XMax, slab_bb.XMax + allowance_xy)
+    y_min = max(stock_bb.YMin, slab_bb.YMin - allowance_xy)
+    y_max = min(stock_bb.YMax, slab_bb.YMax + allowance_xy)
+
+    if (x_max - x_min) <= tolerance or (y_max - y_min) <= tolerance:
+        return None
+
+    z_top = max(float(layer_top_z), float(layer_bottom_z)) + z_margin
+    z_bottom = min(float(layer_top_z), float(layer_bottom_z)) - z_margin
+
+    if (z_top - z_bottom) <= tolerance:
+        return None
+
+    try:
+        return Part.makeBox(
+            x_max - x_min,
+            y_max - y_min,
+            z_top - z_bottom,
+            FreeCAD.Vector(x_min, y_min, z_bottom),
+        )
+    except Exception as exc:
+        Path.Log.warning(f"Failed to build fallback allowance keepout box: {exc}")
+        return None
 
 
 def _extrude_keepout_footprint(
@@ -743,20 +880,32 @@ def build_layered_allowance_removal_volume(
         allowances["stock_xy"],
         tolerance=tolerance,
     )
-    depth_levels = _depth_levels_for_allowance(
-        depthparams, start_depth, final_depth, tolerance=tolerance
-    )
-    layer_intervals = _layer_interval_pairs(depth_levels, final_depth, tolerance=tolerance)
-    if not layer_intervals:
-        Path.Log.warning("Allowance leaves no machinable cutting layers.")
-        return None
-
     protected_shapes = build_protected_shapes(
         obj=obj,
         model=model,
         target_faces=target_faces,
         depthparams=depthparams,
     )
+
+    allowance_breakpoints = _feature_allowance_depth_breakpoints(
+        protected_shapes=protected_shapes,
+        start_depth=start_depth,
+        final_depth=final_depth,
+        feature_allowance_z=allowances["feature_z"],
+        tolerance=tolerance,
+    )
+
+    depth_levels = _depth_levels_for_allowance(
+        depthparams,
+        start_depth,
+        final_depth,
+        extra_depths=allowance_breakpoints,
+        tolerance=tolerance,
+    )
+    layer_intervals = _layer_interval_pairs(depth_levels, final_depth, tolerance=tolerance)
+    if not layer_intervals:
+        Path.Log.warning("Allowance leaves no machinable cutting layers.")
+        return None
 
     removal_layers = []
     for layer_top_z, layer_bottom_z in layer_intervals:
@@ -793,18 +942,41 @@ def build_layered_allowance_removal_volume(
                 stock_shape,
                 allowances["feature_xy"],
             )
-            if offset_area is None:
-                return None
 
-            layer_keepout = _extrude_keepout_footprint(
-                offset_area,
-                layer_top_z,
-                layer_bottom_z,
-                allowances["feature_z"],
-                tolerance=tolerance,
-            )
+            if offset_area is None:
+                layer_keepout = _fallback_keepout_box_from_slab(
+                    protected_slab=protected_slab,
+                    stock_shape=stock_shape,
+                    layer_top_z=layer_top_z,
+                    layer_bottom_z=layer_bottom_z,
+                    feature_allowance_xy=allowances["feature_xy"],
+                    tolerance=tolerance,
+                )
+            else:
+                layer_keepout = _extrude_keepout_footprint(
+                    offset_area,
+                    layer_top_z,
+                    layer_bottom_z,
+                    allowances["feature_z"],
+                    tolerance=tolerance,
+                )
+
+                if layer_keepout is None:
+                    layer_keepout = _fallback_keepout_box_from_slab(
+                        protected_slab=protected_slab,
+                        stock_shape=stock_shape,
+                        layer_top_z=layer_top_z,
+                        layer_bottom_z=layer_bottom_z,
+                        feature_allowance_xy=allowances["feature_xy"],
+                        tolerance=tolerance,
+                    )
+
             if layer_keepout is None:
-                return None
+                Path.Log.warning(
+                    "Could not build allowance keepout for one protected slab; "
+                    "skipping that slab to avoid aborting the entire operation."
+                )
+                continue
 
             try:
                 protected_overlap = layer_boundary.common(layer_keepout)

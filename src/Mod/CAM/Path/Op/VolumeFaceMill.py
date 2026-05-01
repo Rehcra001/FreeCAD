@@ -595,7 +595,9 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         )
 
         sims = []
+        generated_layers = 0
         saved_depthparams = self.depthparams
+
         try:
             for cut_depth_z, layer_shape in layer_volumes:
                 _resolved_depth, pp, sim, z_levels = self._build_path_for_depth_candidates(
@@ -606,15 +608,38 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                     getsim,
                     self._depth_candidates(cut_depth_z),
                 )
+
                 if not z_levels:
-                    return self._abort_no_path(
-                        obj,
-                        f"Failed to generate an allowance layer section at Z {cut_depth_z:.6f}.",
-                        preserve_removalshape=True,
-                    )
+                    try:
+                        bb = layer_shape.BoundBox
+                        Path.Log.warning(
+                            "Skipping allowance layer at "
+                            f"Z {cut_depth_z:.6f}; Path.Area did not produce cutting moves. "
+                            f"Layer bound box: "
+                            f"({bb.XMin:.6f}, {bb.YMin:.6f}, {bb.ZMin:.6f}) -> "
+                            f"({bb.XMax:.6f}, {bb.YMax:.6f}, {bb.ZMax:.6f})"
+                        )
+                    except Exception:
+                        Path.Log.warning(
+                            f"Skipping allowance layer at Z {cut_depth_z:.6f}; "
+                            "Path.Area did not produce cutting moves."
+                        )
+                    continue
+
                 self._append_path_area_result(obj, pp, sim, sims)
+                generated_layers += 1
         finally:
             self.depthparams = saved_depthparams
+
+        if generated_layers == 0:
+            return self._abort_no_path(
+                obj,
+                translate(
+                    "CAM_VolumeFaceMill",
+                    "No realizable Feature Allowance cutting sections were generated.",
+                ),
+                preserve_removalshape=True,
+            )
 
         return sims
 

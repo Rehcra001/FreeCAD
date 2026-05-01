@@ -370,6 +370,20 @@ class TestPathVolumeFaceMill(PathTestBase):
 
         return self._horizontal_face_names_by_height(shape)[-1]
 
+    def _horizontal_face_name_near_z(self, shape, expected_z, tolerance=1e-6):
+        """Return a horizontal face name whose stable Z value is near expected_z."""
+
+        candidates = []
+        for idx, face in enumerate(shape.Faces, start=1):
+            bb = face.BoundBox
+            if abs(bb.ZMax - bb.ZMin) <= tolerance:
+                z_value = 0.5 * (bb.ZMin + bb.ZMax)
+                if abs(z_value - expected_z) <= tolerance:
+                    candidates.append(f"Face{idx}")
+
+        self.assertTrue(candidates, f"No horizontal face found near Z={expected_z}")
+        return candidates[0]
+
     def _horizontal_face_names_by_height(self, shape):
         """Return horizontal face names sorted by increasing Z height."""
 
@@ -1495,7 +1509,7 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertEqual(len(self._cutting_moves(op.Path)), 0)
         self.assertFalse(op.removalshape.isNull())
         warning_mock.assert_called()
-        self.assertIn("allowance layer section", warning_mock.call_args[0][0])
+        self.assertIn("Feature Allowance cutting sections", warning_mock.call_args[0][0])
 
     def test_standard_generation_without_realizable_depth_fails_safely(self):
         job, model = self._make_job_with_25mm_stock_above_model()
@@ -1772,6 +1786,153 @@ class TestPathVolumeFaceMill(PathTestBase):
             self.assertGreaterEqual(y, 5.0 - 1e-6)
             self.assertLessEqual(x, 95.0 + 1e-6)
             self.assertLessEqual(y, 95.0 + 1e-6)
+
+    def test_feature_allowance_on_full_width_target_face_generates_path(self):
+        """Feature allowance must not turn the selected target floor into a keepout."""
+
+        model = self._make_full_plate_model(
+            size=FreeCAD.Vector(100, 100, 10),
+            base=FreeCAD.Vector(0, 0, -10),
+        )
+        job = self._make_job_with_custom_stock_and_model(
+            model,
+            FreeCAD.Vector(100, 100, 20),
+            FreeCAD.Vector(0, 0, -10),
+        )
+
+        top_face = self._highest_horizontal_face_name(model.Shape)
+
+        _job, _model, op = self._create_operation(
+            name="feature_allowance_full_width_target_generates_path",
+            job=job,
+            model=model,
+            base=[(model, [top_face])],
+            step_down=20.0,
+            tool_diameter=10.0,
+        )
+
+        baseline_moves = self._cutting_moves(op.Path)
+        self.assertGreater(len(baseline_moves), 0)
+
+        self._set_allowance_distance(op, "FeatureAllowanceXY", 1.0)
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        allowance_moves = self._cutting_moves(op.Path)
+        self.assertGreater(
+            len(allowance_moves),
+            0,
+            "FeatureAllowanceXY in linked mode should not suppress all toolpath.",
+        )
+
+        z_levels = self._cutting_z_levels(allowance_moves)
+        self._assert_has_z_level(z_levels, 1.0)
+
+    def test_feature_allowance_xy_only_generates_path(self):
+        """XY-only feature allowance should not make the target face a keepout."""
+
+        model = self._make_full_plate_model(
+            size=FreeCAD.Vector(100, 100, 10),
+            base=FreeCAD.Vector(0, 0, -10),
+        )
+        job = self._make_job_with_custom_stock_and_model(
+            model,
+            FreeCAD.Vector(100, 100, 20),
+            FreeCAD.Vector(0, 0, -10),
+        )
+
+        top_face = self._highest_horizontal_face_name(model.Shape)
+
+        _job, _model, op = self._create_operation(
+            name="feature_allowance_xy_only_generates_path",
+            job=job,
+            model=model,
+            base=[(model, [top_face])],
+            step_down=20.0,
+            tool_diameter=10.0,
+        )
+
+        self._set_allowance_mode(op, "FeatureAllowanceMode", "Independent")
+        self._set_allowance_distance(op, "FeatureAllowanceXY", 1.0)
+        self._set_allowance_distance(op, "FeatureAllowanceZ", 0.0)
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        allowance_moves = self._cutting_moves(op.Path)
+        self.assertGreater(
+            len(allowance_moves),
+            0,
+            "XY-only FeatureAllowance should not suppress all toolpath.",
+        )
+
+        z_levels = self._cutting_z_levels(allowance_moves)
+        self._assert_has_z_level(z_levels, 0.0)
+
+    def test_feature_allowance_protects_raised_feature_and_still_generates_path(self):
+        """Feature allowance should preserve a raised island while machining surrounding stock."""
+
+        model = self._make_full_plate_with_raised_feature_model()
+        job = self._make_job_with_custom_stock_and_model(
+            model,
+            FreeCAD.Vector(200, 200, 75),
+            FreeCAD.Vector(0, 0, -25),
+        )
+
+        # The helper creates a plate at Z=-25..0 and a raised feature at Z=0..45.
+        # Select the plate top face at Z=0 as the target depth, not the raised top.
+        target_face = self._horizontal_face_name_near_z(model.Shape, 0.0)
+
+        _job, _model, op = self._create_operation(
+            name="feature_allowance_raised_feature_protected",
+            job=job,
+            model=model,
+            base=[(model, [target_face])],
+            step_down=10.0,
+            tool_diameter=10.0,
+        )
+
+        self._set_allowance_distance(op, "FeatureAllowanceXY", 2.0)
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        cutting_points = self._cutting_points(self._cutting_moves(op.Path))
+        self.assertGreater(len(cutting_points), 0)
+
+        # Raised feature footprint is X/Y 70..130. Linked allowance adds 2 mm.
+        for x, y, z in cutting_points:
+            if z <= 45.0 + 2.0 + 1e-6:
+                self.assertFalse(
+                    self._xy_inside_rect(x, y, 68.0, 132.0, 68.0, 132.0),
+                    f"Cutting move enters raised feature allowance keepout at ({x}, {y}, {z})",
+                )
+
+    def test_feature_allowance_with_coarse_stepdown_still_handles_raised_feature(self):
+        """Coarse StepDown should not make allowance protection consume all layers."""
+
+        model = self._make_full_plate_with_raised_feature_model()
+        job = self._make_job_with_custom_stock_and_model(
+            model,
+            FreeCAD.Vector(200, 200, 75),
+            FreeCAD.Vector(0, 0, -25),
+        )
+
+        target_face = self._horizontal_face_name_near_z(model.Shape, 0.0)
+
+        _job, _model, op = self._create_operation(
+            name="feature_allowance_coarse_stepdown_raised_feature",
+            job=job,
+            model=model,
+            base=[(model, [target_face])],
+            step_down=100.0,
+            tool_diameter=10.0,
+        )
+
+        self._set_allowance_distance(op, "FeatureAllowanceXY", 2.0)
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        cutting_moves = self._cutting_moves(op.Path)
+        self.assertGreater(len(cutting_moves), 0)
+
+        z_levels = self._cutting_z_levels(cutting_moves)
+        self._assert_has_z_level(z_levels, 47.0)
+        self._assert_has_z_level(z_levels, 2.0)
 
     def test_feature_allowance_z_starts_keepout_above_raised_model_feature(self):
         model = self._make_model_with_boss()

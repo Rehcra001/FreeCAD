@@ -1,0 +1,426 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Form</class>
+ <widget class="QWidget" name="Form">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>400</width>
+    <height>520</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string notr="true">Form</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QFrame" name="toolOptions">
+     <property name="frameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <property name="frameShadow">
+      <enum>QFrame::Raised</enum>
+     </property>
+     <layout class="QGridLayout" name="gridLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="toolController_label">
+        <property name="text">
+         <string>Tool controller</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="toolController">
+        <property name="toolTip">
+         <string>The tool and its settings to be used for this operation</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="coolantController_label">
+        <property name="text">
+         <string>Coolant mode</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="coolantController"/>
+      </item>
+      <item row="2" column="0" colspan="2">
+       <widget class="QCheckBox" name="editToolController">
+        <property name="text">
+         <string>Edit Tool Controller</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QFrame" name="operationOptions">
+     <property name="frameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <property name="frameShadow">
+      <enum>QFrame::Raised</enum>
+     </property>
+     <layout class="QGridLayout" name="gridLayout_2">
+      <item row="0" column="0">
+       <widget class="QLabel" name="optimizationMode_label">
+        <property name="text">
+         <string>Optimization mode</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="optimizationMode">
+        <property name="toolTip">
+         <string>Select optional travel-reduction behavior. This does not change protected model geometry.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0" colspan="2">
+       <widget class="QCheckBox" name="protectSelectedFeatures">
+         <property name="toolTip">
+          <string>Protect selected non-target geometry as additional keepout. The lowest selected horizontal face sets the final depth. Selected geometry does not redefine the stock boundary.</string>
+         </property>
+        <property name="text">
+         <string>Protect selected geometry</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0" colspan="2">
+       <widget class="QCheckBox" name="clearEdges">
+         <property name="toolTip">
+          <string>Volume Face Mill uses the Job stock extents as its machining boundary. Allow the tool center to overhang those stock exterior edges so they can be fully cleared.</string>
+         </property>
+        <property name="text">
+         <string>Clear stock edges</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0" colspan="2">
+       <widget class="QCheckBox" name="useStartPoint">
+        <property name="toolTip">
+         <string>Specify if this operation uses a starting point.</string>
+        </property>
+        <property name="text">
+         <string>Use start point</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="2">
+       <widget class="QToolButton" name="setStartPoint">
+        <property name="toolTip">
+         <string>Set picked point as start point</string>
+        </property>
+        <property name="text">
+         <string notr="true">...</string>
+        </property>
+        <property name="icon">
+         <iconset>
+          <normaloff>:/icons/button_left.svg</normaloff>:/icons/button_left.svg
+         </iconset>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  <item>
+   <widget class="QFrame" name="toolpathOptions">
+     <property name="frameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <property name="frameShadow">
+      <enum>QFrame::Raised</enum>
+     </property>
+     <layout class="QFormLayout" name="formLayout">
+      <property name="fieldGrowthPolicy">
+       <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+      </property>
+      <item row="0" column="0">
+       <widget class="QLabel" name="cutMode_label">
+        <property name="text">
+         <string>Cut mode</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="cutMode">
+        <property name="toolTip">
+         <string>Climb or conventional milling direction.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="clearingPattern_label">
+        <property name="text">
+         <string>Clearing pattern</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="clearingPattern">
+        <property name="toolTip">
+         <string>Pattern used to clear the safe removal volume.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="stepOverPercent_label">
+        <property name="text">
+         <string>Step over percent</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QSpinBox" name="stepOverPercent">
+        <property name="toolTip">
+         <string>Percent of the tool diameter used for each lateral step over.</string>
+        </property>
+        <property name="minimum">
+         <number>1</number>
+        </property>
+        <property name="maximum">
+         <number>100</number>
+        </property>
+        <property name="singleStep">
+         <number>5</number>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="angle_label">
+        <property name="text">
+         <string>Angle</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="Gui::InputField" name="angle">
+        <property name="toolTip">
+         <string>Angle in which the pattern is applied.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="extraOffset_label">
+        <property name="text">
+         <string>Extra offset</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="Gui::InputField" name="extraOffset">
+        <property name="toolTip">
+         <string>Extra offset to apply to the operation boundary.</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+   </widget>
+  </item>
+   <item>
+    <widget class="QFrame" name="featureAllowanceOptions">
+     <property name="frameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <property name="frameShadow">
+      <enum>QFrame::Raised</enum>
+     </property>
+     <layout class="QGridLayout" name="gridLayout_3">
+      <item row="0" column="0">
+       <widget class="QLabel" name="featureAllowanceMode_label">
+        <property name="text">
+         <string>Feature allowance mode</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="featureAllowanceMode">
+        <property name="toolTip">
+         <string>Linked edits one value for both XY and Z feature allowance. Independent edits XY and Z separately. Allowance directions use job/world axes, and separate X and Y values are not supported in this phase.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0" colspan="2">
+       <widget class="QFrame" name="featureAllowanceLinkedFrame">
+        <layout class="QFormLayout" name="formLayout_2">
+         <property name="fieldGrowthPolicy">
+          <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+         </property>
+         <item row="0" column="0">
+          <widget class="QLabel" name="featureAllowanceLinked_label">
+           <property name="text">
+            <string>Allowance</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="Gui::QuantitySpinBox" name="featureAllowanceLinked">
+           <property name="toolTip">
+            <string>Material to leave on protected model and selected keepout geometry in both the job/world XY plane and the job/world +Z axis while linked mode is active. Separate X and Y values are not supported in this phase.</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+      <item row="2" column="0" colspan="2">
+       <widget class="QFrame" name="featureAllowanceIndependentFrame">
+        <layout class="QFormLayout" name="formLayout_3">
+         <property name="fieldGrowthPolicy">
+          <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+         </property>
+         <item row="0" column="0">
+          <widget class="QLabel" name="featureAllowanceXY_label">
+           <property name="text">
+            <string>XY allowance</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="Gui::QuantitySpinBox" name="featureAllowanceXY">
+           <property name="toolTip">
+            <string>Lateral material to leave on protected model and selected keepout geometry in the job/world XY plane. Separate X and Y values are not supported in this phase.</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QLabel" name="featureAllowanceZ_label">
+           <property name="text">
+            <string>Z allowance</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="Gui::QuantitySpinBox" name="featureAllowanceZ">
+           <property name="toolTip">
+            <string>Vertical material to leave above protected model and selected keepout geometry in the job/world +Z axis for top-down machining.</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QFrame" name="stockAllowanceOptions">
+     <property name="frameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <property name="frameShadow">
+      <enum>QFrame::Raised</enum>
+     </property>
+     <layout class="QGridLayout" name="gridLayout_4">
+      <item row="0" column="0">
+       <widget class="QLabel" name="stockAllowanceMode_label">
+        <property name="text">
+         <string>Stock allowance mode</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="stockAllowanceMode">
+        <property name="toolTip">
+         <string>Linked edits one value for both XY and Z stock allowance. Independent edits XY and Z separately. Allowance directions use job/world axes, and separate X and Y values are not supported in this phase.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0" colspan="2">
+       <widget class="QFrame" name="stockAllowanceLinkedFrame">
+        <layout class="QFormLayout" name="formLayout_4">
+         <property name="fieldGrowthPolicy">
+          <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+         </property>
+         <item row="0" column="0">
+          <widget class="QLabel" name="stockAllowanceLinked_label">
+           <property name="text">
+            <string>Allowance</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="Gui::QuantitySpinBox" name="stockAllowanceLinked">
+           <property name="toolTip">
+            <string>Material to leave on the job/world XY stock boundary and above stock bottom in the job/world +Z axis while linked mode is active. Separate X and Y values are not supported in this phase.</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+      <item row="2" column="0" colspan="2">
+       <widget class="QFrame" name="stockAllowanceIndependentFrame">
+        <layout class="QFormLayout" name="formLayout_5">
+         <property name="fieldGrowthPolicy">
+          <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+         </property>
+         <item row="0" column="0">
+          <widget class="QLabel" name="stockAllowanceXY_label">
+           <property name="text">
+            <string>XY allowance</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="Gui::QuantitySpinBox" name="stockAllowanceXY">
+           <property name="toolTip">
+            <string>Lateral material to leave at the job/world XY stock boundary. Separate X and Y values are not supported in this phase.</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QLabel" name="stockAllowanceZ_label">
+           <property name="text">
+            <string>Z allowance</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="Gui::QuantitySpinBox" name="stockAllowanceZ">
+           <property name="toolTip">
+            <string>Vertical material to leave above stock bottom in the job/world +Z axis when no target face governs the finish depth.</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>40</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+ <customwidget>
+  <class>Gui::InputField</class>
+  <extends>QLineEdit</extends>
+  <header>Gui/InputField.h</header>
+ </customwidget>
+  <customwidget>
+   <class>Gui::QuantitySpinBox</class>
+   <extends>QWidget</extends>
+   <header>Gui/QuantitySpinBox.h</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>

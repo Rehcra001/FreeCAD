@@ -388,6 +388,8 @@ SET(PathPythonOp_SRCS
     Path/Op/Tapping.py
     Path/Op/ThreadMilling.py
     Path/Op/Util.py
+    Path/Op/VolumeFaceMill.py
+    Path/Op/VolumeFaceMillUtils.py
     Path/Op/Vcarve.py
     Path/Op/Waterline.py
 )
@@ -421,6 +423,7 @@ SET(PathPythonOpGui_SRCS
     Path/Op/Gui/Surface.py
     Path/Op/Gui/Tapping.py
     Path/Op/Gui/ThreadMilling.py
+    Path/Op/Gui/VolumeFaceMill.py
     Path/Op/Gui/Vcarve.py
     Path/Op/Gui/Waterline.py
 )
@@ -595,6 +598,7 @@ SET(Tests_SRCS
     CAMTests/TestPathToolController.py
     CAMTests/TestPathUtil.py
     CAMTests/TestPathVcarve.py
+    CAMTests/TestPathVolumeFaceMill.py
     CAMTests/TestPathVoronoi.py
     CAMTests/TestGrblLegacyPost.py
     CAMTests/TestDressupPost.py

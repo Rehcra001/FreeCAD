@@ -347,6 +347,11 @@ def customselect():
         FreeCAD.Console.PrintWarning("Custom Select Mode\n")
 
 
+def volumefacemillselect():
+    if not Path.Preferences.suppressSelectionModeWarning():
+        FreeCAD.Console.PrintWarning("Volume Face Mill Select Mode\n")
+
+
 def turnselect():
     FreeCADGui.Selection.addSelectionGate(TURNGate())
     if not Path.Preferences.suppressSelectionModeWarning():
@@ -367,6 +372,7 @@ def select(op):
     opsel["Pocket 3D"] = pocketselect
     opsel["Pocket3D"] = pocketselect  # deprecated
     opsel["Pocket Shape"] = pocketselect
+    opsel["VolumeFaceMill"] = volumefacemillselect
     opsel["Profile Edges"] = eselect  # deprecated
     opsel["Profile Faces"] = fselect  # deprecated
     opsel["Profile"] = profileselect

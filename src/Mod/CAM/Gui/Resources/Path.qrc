@@ -65,6 +65,7 @@
         <file>icons/CAM_ToolTable.svg</file>
         <file>icons/CAM_ToolTableAdd.svg</file>
         <file>icons/CAM_ToolTableRemove.svg</file>
+        <file>icons/CAM_VolumeFaceMill.svg</file>
         <file>icons/CAM_Vcarve.svg</file>
         <file>icons/CAM_Waterline.svg</file>
         <file>icons/arrow-ccw.svg</file>
@@ -119,6 +120,7 @@
         <file>panels/PageOpSurfaceEdit.ui</file>
         <file>panels/PageOpTappingEdit.ui</file>
         <file>panels/PageOpThreadMillingEdit.ui</file>
+        <file>panels/PageOpVolumeFaceMillEdit.ui</file>
         <file>panels/PageOpWaterlineEdit.ui</file>
         <file>panels/PageOpVcarveEdit.ui</file>
         <file>panels/PathEdit.ui</file>

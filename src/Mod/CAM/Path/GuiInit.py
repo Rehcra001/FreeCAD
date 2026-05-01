@@ -79,6 +79,7 @@ def Startup():
         from Path.Op.Gui import Stop
         from Path.Op.Gui import Tapping
         from Path.Op.Gui import ThreadMilling
+        from Path.Op.Gui import VolumeFaceMill
         from Path.Op.Gui import Vcarve
         from Path.Post import Command
         from Path.Tool import Controller

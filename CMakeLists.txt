@@ -24,6 +24,7 @@ endif()
 # Suppress 'FindBoost module is removed' warning. Will use BoostConfig.cmake instead
 if(POLICY CMP0167)
     cmake_policy(SET CMP0167 NEW)
+
 endif()
 
 # As of cMake 3.31 add_custom_command() rejects invalid arguments

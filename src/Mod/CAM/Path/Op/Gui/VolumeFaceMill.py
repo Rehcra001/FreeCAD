@@ -93,6 +93,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             ("cutMode", "CutMode"),
             ("cuttingStrategy", "CuttingStrategy"),
             ("optimizationMode", "OptimizationMode"),
+            ("materialStateMode", "MaterialStateMode"),
             ("featureAllowanceMode", "FeatureAllowanceMode"),
             ("stockAllowanceMode", "StockAllowanceMode"),
         ]
@@ -285,6 +286,9 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             if obj.OptimizationMode != str(self.form.optimizationMode.currentData()):
                 obj.OptimizationMode = str(self.form.optimizationMode.currentData())
 
+            if obj.MaterialStateMode != str(self.form.materialStateMode.currentData()):
+                obj.MaterialStateMode = str(self.form.materialStateMode.currentData())
+
             if obj.StepOver != self.form.stepOverPercent.value():
                 obj.StepOver = self.form.stepOverPercent.value()
 
@@ -315,6 +319,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         self.selectInComboBox(obj.CutMode, self.form.cutMode)
         self.selectInComboBox(obj.CuttingStrategy, self.form.cuttingStrategy)
         self.selectInComboBox(obj.OptimizationMode, self.form.optimizationMode)
+        self.selectInComboBox(obj.MaterialStateMode, self.form.materialStateMode)
 
         self.form.stepOverPercent.setValue(obj.StepOver)
         self.form.extraOffset.setText(
@@ -343,6 +348,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         signals.append(self.form.cutMode.currentIndexChanged)
         signals.append(self.form.cuttingStrategy.currentIndexChanged)
         signals.append(self.form.optimizationMode.currentIndexChanged)
+        signals.append(self.form.materialStateMode.currentIndexChanged)
         signals.append(self.form.stepOverPercent.editingFinished)
         signals.append(self.form.extraOffset.editingFinished)
         signals.append(self.form.angle.editingFinished)
@@ -385,6 +391,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             "FeatureAllowanceMode",
             "FeatureAllowanceXY",
             "FeatureAllowanceZ",
+            "MaterialStateMode",
             "OptimizationMode",
             "ProtectSelectedFeatures",
             "StepOver",

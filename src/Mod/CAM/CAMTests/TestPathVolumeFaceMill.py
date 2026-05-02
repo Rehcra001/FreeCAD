@@ -11,6 +11,7 @@ from unittest import mock
 import FreeCAD
 import Part
 import Path
+import Path.Base.SetupSheet as PathSetupSheet
 import Path.Main.Job as PathJob
 import Path.Main.Stock as PathStock
 import Path.Op.VolumeFaceMill as PathVolumeFaceMill
@@ -24,9 +25,24 @@ class _FakeComboBox:
 
     def __init__(self, data=None):
         self._data = data
+        self.currentIndexChanged = object()
 
     def currentData(self):
         return self._data
+
+
+class _FakeCheckBox:
+    """Minimal checkbox test double."""
+
+    def __init__(self, checked=False):
+        self._checked = bool(checked)
+        self.clicked = object()
+
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, checked):
+        self._checked = bool(checked)
 
 
 class _FakeFrame:
@@ -46,6 +62,35 @@ class _FakeQuantityWidget:
         self.value = float(value)
         self.enabled = True
         self.editingFinished = object()
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
+
+
+class _FakeSpinBoxWidget:
+    """Minimal spin-box style test double."""
+
+    def __init__(self, value=0):
+        self._value = value
+        self.editingFinished = object()
+
+    def value(self):
+        return self._value
+
+    def setValue(self, value):
+        self._value = value
+
+
+class _FakeTextWidget:
+    """Minimal text field test double with enabled state."""
+
+    def __init__(self, text=""):
+        self.text = text
+        self.enabled = True
+        self.editingFinished = object()
+
+    def setText(self, text):
+        self.text = text
 
     def setEnabled(self, enabled):
         self.enabled = bool(enabled)
@@ -1015,11 +1060,148 @@ class TestPathVolumeFaceMill(PathTestBase):
             ["StrictRaster", "SquareSpiral", "RoundSpiral", "OffsetLoops", "Auto"],
         )
 
+    def test_cutting_strategy_labels_match_target_plan(self):
+        raw_enums = PathVolumeFaceMill.ObjectVolumeFaceMill.propertyEnumerations(dataType="raw")
+
+        self.assertEqual(
+            raw_enums["CuttingStrategy"],
+            [
+                ("Strict raster", "StrictRaster"),
+                ("Square spiral", "SquareSpiral"),
+                ("Round spiral", "RoundSpiral"),
+                ("Offset loops", "OffsetLoops"),
+                ("Auto", "Auto"),
+            ],
+        )
+
     def test_cutting_strategy_setup_properties_replace_clearing_pattern(self):
         setup_properties = PathVolumeFaceMill.SetupProperties()
 
         self.assertIn("CuttingStrategy", setup_properties)
         self.assertNotIn("ClearingPattern", setup_properties)
+
+    def test_material_state_mode_defaults_to_full_stock(self):
+        _job, _model, op = self._create_operation(name="material_state_default")
+
+        self.assertTrue(hasattr(op, "MaterialStateMode"))
+        self.assertEqual(op.MaterialStateMode, "FullStock")
+        self.assertEqual(
+            list(op.getEnumerationsOfProperty("MaterialStateMode")),
+            ["FullStock", "RemainingMaterial"],
+        )
+
+    def test_material_state_mode_is_in_setup_properties(self):
+        self.assertIn("MaterialStateMode", PathVolumeFaceMill.SetupProperties())
+
+    def test_material_state_mode_restore_backfills_missing_property(self):
+        _job, _model, op = self._create_operation(
+            name="material_state_restore_backfill",
+            override_heights=False,
+        )
+
+        self.assertTrue(hasattr(op, "MaterialStateMode"))
+        op.removeProperty("MaterialStateMode")
+        self.assertFalse(hasattr(op, "MaterialStateMode"))
+
+        op.Proxy.opOnDocumentRestored(op)
+
+        self.assertTrue(hasattr(op, "MaterialStateMode"))
+        self.assertEqual(op.MaterialStateMode, "FullStock")
+        self.assertEqual(
+            list(op.getEnumerationsOfProperty("MaterialStateMode")),
+            ["FullStock", "RemainingMaterial"],
+        )
+
+    def test_material_state_full_stock_generates_path(self):
+        _job, _model, op = self._create_operation(name="material_state_full_stock")
+        op.MaterialStateMode = "FullStock"
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        self.assertGreater(len(self._cutting_moves(op.Path)), 0)
+        self.assertFalse(op.removalshape.isNull())
+
+    def test_material_state_remaining_material_fails_safely_in_phase_4(self):
+        _job, _model, op = self._create_operation(name="material_state_remaining_material")
+        op.MaterialStateMode = "RemainingMaterial"
+
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        self.assertEqual(len(self._cutting_moves(op.Path)), 0)
+        self.assertTrue(op.removalshape.isNull())
+
+    def test_material_state_mode_round_trip_preserves_persisted_value(self):
+        _job, _model, op = self._create_operation(name="material_state_round_trip")
+        op.MaterialStateMode = "RemainingMaterial"
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".FCStd")
+        temp_file.close()
+        reopened = None
+        original_doc_name = self.doc.Name
+
+        try:
+            self.doc.saveAs(temp_file.name)
+            reopened = FreeCAD.openDocument(temp_file.name)
+
+            restored = reopened.getObject(op.Name)
+            self.assertIsNotNone(restored)
+            self.assertTrue(hasattr(restored, "MaterialStateMode"))
+            self.assertEqual(restored.MaterialStateMode, "RemainingMaterial")
+            self.assertEqual(len(self._cutting_moves(restored.Path)), 0)
+            self.assertTrue(restored.removalshape.isNull())
+        finally:
+            if reopened is not None:
+                FreeCAD.closeDocument(reopened.Name)
+            if original_doc_name in FreeCAD.listDocuments():
+                self.doc = FreeCAD.getDocument(original_doc_name)
+            else:
+                self.doc = FreeCAD.newDocument("TestPathVolumeFaceMill")
+            os.unlink(temp_file.name)
+
+    def test_material_state_mode_setup_sheet_template_round_trip(self):
+        opname = "VolumeFaceMillMaterialStateTemplate"
+        previous_registration = PathSetupSheet._RegisteredOps.get(opname)
+        setup_sheet = PathSetupSheet.Create()
+        restored_setup_sheet = None
+
+        try:
+            self.assertSuccessfulRecompute(self.doc, setup_sheet)
+            PathSetupSheet.RegisterOperation(
+                opname,
+                PathVolumeFaceMill.Create,
+                PathVolumeFaceMill.SetupProperties,
+            )
+
+            prototype = PathSetupSheet._RegisteredOps[opname].prototype("material_state_template")
+            material_state_property = prototype.getProperty("MaterialStateMode")
+            self.assertEqual(
+                material_state_property.getEnumValues(),
+                ["FullStock", "RemainingMaterial"],
+            )
+            material_state_property.setupProperty(
+                setup_sheet,
+                PathSetupSheet.OpPropertyName(opname, material_state_property.name),
+                PathSetupSheet.OpPropertyGroup(opname),
+                "RemainingMaterial",
+            )
+
+            attrs = setup_sheet.Proxy.templateAttributes(False, False, False, False, [opname])
+            encoded = setup_sheet.Proxy.encodeTemplateAttributes(attrs)
+
+            restored_setup_sheet = PathSetupSheet.Create()
+            self.assertSuccessfulRecompute(self.doc, restored_setup_sheet)
+            restored_setup_sheet.Proxy.setFromTemplate(encoded)
+
+            _job, _model, op = self._create_operation(name="material_state_setup_sheet_target")
+            self.assertEqual(op.MaterialStateMode, "FullStock")
+
+            restored_setup_sheet.Proxy.setOperationProperties(op, opname)
+            self.assertEqual(op.MaterialStateMode, "RemainingMaterial")
+        finally:
+            if previous_registration is None:
+                PathSetupSheet._RegisteredOps.pop(opname, None)
+            else:
+                PathSetupSheet._RegisteredOps[opname] = previous_registration
 
     def test_allowance_setup_properties_use_xy_z_contract(self):
         setup_properties = PathVolumeFaceMill.SetupProperties()
@@ -1469,6 +1651,11 @@ class TestPathVolumeFaceMill(PathTestBase):
         )
         self.assertIn("strict face-milling toolpaths", tooltips["cuttingStrategy"])
         self.assertIn("implemented in later phases", tooltips["cuttingStrategy"])
+        self.assertIn("full Job stock", tooltips["materialStateMode"])
+        self.assertIn(
+            "Remaining material is reserved for a later implementation phase.",
+            tooltips["materialStateMode"],
+        )
         self.assertIn("job/world XY plane", tooltips["featureAllowanceXY"])
         self.assertIn("job/world +Z axis", tooltips["featureAllowanceZ"])
         self.assertIn("job/world axes", tooltips["stockAllowanceMode"])
@@ -1509,6 +1696,13 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertNotIn("clearingPattern", widget_names)
         self.assertNotIn("clearingPattern_label", widget_names)
 
+    def test_volume_face_mill_ui_contains_material_state_mode(self):
+        tree = ET.parse(self._volume_face_mill_ui_path())
+        names = {element.attrib.get("name") for element in tree.iter() if "name" in element.attrib}
+
+        self.assertIn("materialStateMode", names)
+        self.assertIn("materialStateMode_label", names)
+
     def test_volume_face_mill_gui_binds_cutting_strategy_not_clearing_pattern(self):
         gui_path = self._volume_face_mill_gui_path()
         with open(gui_path, encoding="utf-8") as handle:
@@ -1516,6 +1710,51 @@ class TestPathVolumeFaceMill(PathTestBase):
 
         self.assertIn('("cuttingStrategy", "CuttingStrategy")', source)
         self.assertNotIn('("clearingPattern", "ClearingPattern")', source)
+        self.assertIn('("materialStateMode", "MaterialStateMode")', source)
+        self.assertIn("self.form.materialStateMode.currentIndexChanged", source)
+        self.assertIn('"MaterialStateMode"', source)
+
+    def test_material_state_gui_controller_round_trips_task_panel_selection(self):
+        _job, _model, op = self._create_operation(name="material_state_gui_roundtrip")
+        gui_module = self._load_headless_volume_face_mill_gui_module()
+        controller = gui_module.TaskPanelOpPage.__new__(gui_module.TaskPanelOpPage)
+        controller.form = types.SimpleNamespace(
+            toolController=object(),
+            coolantController=object(),
+            cutMode=_FakeComboBox(op.CutMode),
+            cuttingStrategy=_FakeComboBox(op.CuttingStrategy),
+            optimizationMode=_FakeComboBox(op.OptimizationMode),
+            materialStateMode=_FakeComboBox("RemainingMaterial"),
+            stepOverPercent=_FakeSpinBoxWidget(op.StepOver),
+            extraOffset=_FakeTextWidget(),
+            angle=_FakeTextWidget(),
+            protectSelectedFeatures=_FakeCheckBox(op.ProtectSelectedFeatures),
+            clearEdges=_FakeCheckBox(op.ClearEdges),
+            useStartPoint=_FakeCheckBox(op.UseStartPoint),
+            featureAllowanceMode=_FakeComboBox(op.FeatureAllowanceMode),
+            stockAllowanceMode=_FakeComboBox(op.StockAllowanceMode),
+            featureAllowanceLinkedFrame=_FakeFrame(),
+            featureAllowanceIndependentFrame=_FakeFrame(),
+            stockAllowanceLinkedFrame=_FakeFrame(),
+            stockAllowanceIndependentFrame=_FakeFrame(),
+            featureAllowanceLinked=_FakeQuantityWidget(op.FeatureAllowanceXY.Value),
+            featureAllowanceXY=_FakeQuantityWidget(op.FeatureAllowanceXY.Value),
+            featureAllowanceZ=_FakeQuantityWidget(op.FeatureAllowanceZ.Value),
+            stockAllowanceLinked=_FakeQuantityWidget(op.StockAllowanceXY.Value),
+            stockAllowanceXY=_FakeQuantityWidget(op.StockAllowanceXY.Value),
+            stockAllowanceZ=_FakeQuantityWidget(op.StockAllowanceZ.Value),
+            stockEdgeClearanceX=_FakeQuantityWidget(op.StockEdgeClearanceX.Value),
+            stockEdgeClearanceY=_FakeQuantityWidget(op.StockEdgeClearanceY.Value),
+        )
+        controller.initPage(op)
+
+        controller.getFields(op)
+        self.assertEqual(op.MaterialStateMode, "RemainingMaterial")
+
+        controller.form.materialStateMode._data = "FullStock"
+        op.MaterialStateMode = "RemainingMaterial"
+        controller.setFields(op)
+        self.assertEqual(controller.form.materialStateMode._data, "RemainingMaterial")
 
     def test_allowance_gui_controller_linked_mode_writes_xy_and_z_and_hides_independent_fields(
         self,

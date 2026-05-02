@@ -80,7 +80,21 @@
         </property>
        </widget>
       </item>
-      <item row="1" column="0" colspan="2">
+      <item row="1" column="0">
+       <widget class="QLabel" name="materialStateMode_label">
+        <property name="text">
+         <string>Material state</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="materialStateMode">
+        <property name="toolTip">
+         <string>Select whether this operation uses the full Job stock or material remaining from previous operations. Remaining material is reserved for a later implementation phase.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0" colspan="2">
        <widget class="QCheckBox" name="protectSelectedFeatures">
          <property name="toolTip">
           <string>Protect selected non-target geometry as additional keepout. The lowest selected horizontal face sets the final depth. Selected geometry does not redefine the stock boundary. Target detection uses Job/world Z.</string>
@@ -90,7 +104,7 @@
         </property>
        </widget>
       </item>
-      <item row="2" column="0" colspan="2">
+      <item row="3" column="0" colspan="2">
        <widget class="QCheckBox" name="clearEdges">
         <property name="toolTip">
          <string>Allow the tool center to overhang true stock exterior edges. X and Y overhang distances are controlled by the edge clearance fields. This does not override stock allowance material-to-leave.</string>
@@ -100,35 +114,35 @@
         </property>
        </widget>
       </item>
-      <item row="3" column="0">
+      <item row="4" column="0">
        <widget class="QLabel" name="stockEdgeClearanceX_label">
         <property name="text">
          <string>X edge clearance</string>
         </property>
        </widget>
       </item>
-      <item row="3" column="1" colspan="2">
+      <item row="4" column="1" colspan="2">
        <widget class="Gui::QuantitySpinBox" name="stockEdgeClearanceX">
         <property name="toolTip">
          <string>Distance the tool center may overhang true stock exterior edges in the X direction when Clear stock edges is enabled. The default is tool radius plus 0.1 mm.</string>
         </property>
        </widget>
       </item>
-      <item row="4" column="0">
+      <item row="5" column="0">
        <widget class="QLabel" name="stockEdgeClearanceY_label">
         <property name="text">
          <string>Y edge clearance</string>
         </property>
        </widget>
       </item>
-      <item row="4" column="1" colspan="2">
+      <item row="5" column="1" colspan="2">
        <widget class="Gui::QuantitySpinBox" name="stockEdgeClearanceY">
         <property name="toolTip">
          <string>Distance the tool center may overhang true stock exterior edges in the Y direction when Clear stock edges is enabled. The default is tool radius plus 0.1 mm.</string>
         </property>
        </widget>
       </item>
-      <item row="5" column="0" colspan="2">
+      <item row="6" column="0" colspan="2">
        <widget class="QCheckBox" name="useStartPoint">
         <property name="toolTip">
          <string>Specify if this operation uses a starting point.</string>
@@ -138,7 +152,7 @@
         </property>
        </widget>
       </item>
-      <item row="5" column="2">
+      <item row="6" column="2">
        <widget class="QToolButton" name="setStartPoint">
         <property name="toolTip">
          <string>Set picked point as start point</string>

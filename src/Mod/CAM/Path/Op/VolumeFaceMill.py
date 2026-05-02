@@ -53,6 +53,8 @@ _STOCK_EDGE_CLEARANCE_PROPERTIES = (
 )
 _CUTTING_STRATEGY_DEFAULT = "StrictRaster"
 _CUTTING_STRATEGY_SUPPORTED_IN_PHASE_1 = {"StrictRaster"}
+_MATERIAL_STATE_MODE_DEFAULT = "FullStock"
+_MATERIAL_STATE_MODE_SUPPORTED_IN_PHASE_4 = {"FullStock"}
 _CUTTING_STRATEGY_FROM_CLEARING_PATTERN = {
     "ZigZag": "StrictRaster",
     "Line": "StrictRaster",
@@ -78,6 +80,15 @@ def _unsupported_cutting_strategy_message():
     )
 
 
+def _unsupported_material_state_message():
+    """Return the Phase 4 unsupported material-state error message."""
+
+    return translate(
+        "CAM_VolumeFaceMill",
+        "Remaining material mode is not implemented for Volume Face Mill yet.",
+    )
+
+
 class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
     """Proxy object for stock-aware Volume Face Mill operation."""
 
@@ -89,7 +100,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         """Initialize transient proxy state that is not persisted in documents."""
 
         self._forcing_compatibility_properties = False
-        self._backfilling_property_contract = False
+        self._backfilling_volume_face_mill_property_contract = False
         self._pending_standard_abort = None
         self._syncing_allowances = False
         self._syncing_depths = False
@@ -99,8 +110,8 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         if not hasattr(self, "_forcing_compatibility_properties"):
             self._forcing_compatibility_properties = False
-        if not hasattr(self, "_backfilling_property_contract"):
-            self._backfilling_property_contract = False
+        if not hasattr(self, "_backfilling_volume_face_mill_property_contract"):
+            self._backfilling_volume_face_mill_property_contract = False
         if not hasattr(self, "_pending_standard_abort"):
             self._pending_standard_abort = None
         if not hasattr(self, "_syncing_allowances"):
@@ -121,11 +132,15 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 (translate("CAM_VolumeFaceMill", "Min Travel"), "MinTravel"),
             ],
             "CuttingStrategy": [
-                (translate("CAM_VolumeFaceMill", "Strict Raster"), "StrictRaster"),
-                (translate("CAM_VolumeFaceMill", "Square Spiral"), "SquareSpiral"),
-                (translate("CAM_VolumeFaceMill", "Round Spiral"), "RoundSpiral"),
-                (translate("CAM_VolumeFaceMill", "Offset Loops"), "OffsetLoops"),
+                (translate("CAM_VolumeFaceMill", "Strict raster"), "StrictRaster"),
+                (translate("CAM_VolumeFaceMill", "Square spiral"), "SquareSpiral"),
+                (translate("CAM_VolumeFaceMill", "Round spiral"), "RoundSpiral"),
+                (translate("CAM_VolumeFaceMill", "Offset loops"), "OffsetLoops"),
                 (translate("CAM_VolumeFaceMill", "Auto"), "Auto"),
+            ],
+            "MaterialStateMode": [
+                (translate("CAM_VolumeFaceMill", "Full job stock"), "FullStock"),
+                (translate("CAM_VolumeFaceMill", "Remaining material"), "RemainingMaterial"),
             ],
             "FeatureAllowanceMode": [
                 (translate("CAM_VolumeFaceMill", "Linked"), "Linked"),
@@ -245,6 +260,18 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 ),
             )
             added_properties.add("CuttingStrategy")
+
+        if not hasattr(obj, "MaterialStateMode"):
+            obj.addProperty(
+                "App::PropertyEnumeration",
+                "MaterialStateMode",
+                "Path",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Material state used by Volume Face Mill.",
+                ),
+            )
+            added_properties.add("MaterialStateMode")
 
         if not hasattr(obj, "FeatureAllowanceMode"):
             obj.addProperty(
@@ -553,6 +580,23 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         else:
             obj.CuttingStrategy = _CUTTING_STRATEGY_DEFAULT
 
+    def _initialize_material_state_mode_property(self, obj, added_properties):
+        """Initialize or restore the Volume Face Mill material-state mode."""
+
+        if not hasattr(obj, "MaterialStateMode"):
+            return
+
+        valid_values = [
+            value
+            for _label, value in self.propertyEnumerations(dataType="raw")["MaterialStateMode"]
+        ]
+        current_value = getattr(obj, "MaterialStateMode", None)
+
+        if current_value in valid_values and "MaterialStateMode" not in added_properties:
+            return
+
+        obj.MaterialStateMode = _MATERIAL_STATE_MODE_DEFAULT
+
     def _validate_phase_1_cutting_strategy(self, obj):
         """Return True if the selected strategy is allowed in the current implementation phase."""
 
@@ -561,45 +605,62 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         return obj.CuttingStrategy in _CUTTING_STRATEGY_SUPPORTED_IN_PHASE_1
 
-    def _backfill_allowance_property_contract(self, obj):
-        """Apply allowance property creation and migration without edit-time sync."""
+    def _validate_phase_4_material_state_mode(self, obj):
+        """Return True if the selected material-state mode is implemented in this phase."""
+
+        if not hasattr(obj, "MaterialStateMode"):
+            return True
+
+        return obj.MaterialStateMode in _MATERIAL_STATE_MODE_SUPPORTED_IN_PHASE_4
+
+    def _apply_volume_face_mill_property_enumerations(self, obj):
+        """Assign current enumeration value lists to supported VFM properties."""
+
+        for name, values in self.propertyEnumerations():
+            if hasattr(obj, name):
+                setattr(obj, name, values)
+
+    def _backfill_volume_face_mill_allowance_contract(self, obj, added_properties):
+        """Restore allowance migration and defaults for VFM allowance properties."""
+
+        preserved_z_values = {
+            z_prop: self._distance_property_value(obj, z_prop)
+            for _mode_prop, _xy_prop, z_prop in _ALLOWANCE_GROUPS
+        }
+        migrated_properties = self._migrate_allowance_compatibility_properties(
+            obj, added_properties
+        )
+        self._initialize_allowance_properties(obj, added_properties, migrated_properties)
+
+        for _mode_prop, xy_prop, z_prop in _ALLOWANCE_GROUPS:
+            if z_prop in added_properties or xy_prop not in migrated_properties:
+                continue
+
+            preserved_z_value = preserved_z_values.get(z_prop)
+            if preserved_z_value is None:
+                continue
+
+            VolumeFaceMillUtils.set_distance_property(obj, z_prop, preserved_z_value)
+
+    def _backfill_volume_face_mill_property_contract(self, obj):
+        """Restore Volume Face Mill property defaults, enums, and compatibility data."""
 
         self._ensure_runtime_state()
-        previous_backfill_state = self._backfilling_property_contract
+        previous_backfill_state = self._backfilling_volume_face_mill_property_contract
         previous_sync_state = self._syncing_allowances
-        self._backfilling_property_contract = True
+        self._backfilling_volume_face_mill_property_contract = True
         self._syncing_allowances = True
         try:
             added_properties = self._add_properties(obj)
             for prop_name in _STOCK_EDGE_CLEARANCE_PROPERTIES:
                 if prop_name in added_properties:
                     self._set_stock_edge_clearance_default(obj, prop_name)
-            preserved_z_values = {
-                z_prop: self._distance_property_value(obj, z_prop)
-                for _mode_prop, _xy_prop, z_prop in _ALLOWANCE_GROUPS
-            }
-
-            for name, values in self.propertyEnumerations():
-                if hasattr(obj, name):
-                    setattr(obj, name, values)
-
+            self._apply_volume_face_mill_property_enumerations(obj)
             self._initialize_cutting_strategy_property(obj, added_properties)
-            migrated_properties = self._migrate_allowance_compatibility_properties(
-                obj, added_properties
-            )
-            self._initialize_allowance_properties(obj, added_properties, migrated_properties)
-
-            for _mode_prop, xy_prop, z_prop in _ALLOWANCE_GROUPS:
-                if z_prop in added_properties or xy_prop not in migrated_properties:
-                    continue
-
-                preserved_z_value = preserved_z_values.get(z_prop)
-                if preserved_z_value is None:
-                    continue
-
-                VolumeFaceMillUtils.set_distance_property(obj, z_prop, preserved_z_value)
+            self._initialize_material_state_mode_property(obj, added_properties)
+            self._backfill_volume_face_mill_allowance_contract(obj, added_properties)
         finally:
-            self._backfilling_property_contract = previous_backfill_state
+            self._backfilling_volume_face_mill_property_contract = previous_backfill_state
             self._syncing_allowances = previous_sync_state
 
         self._force_compatibility_properties(obj)
@@ -609,7 +670,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         Path.Log.track()
         self._ensure_runtime_state()
-        self._backfill_allowance_property_contract(obj)
+        self._backfill_volume_face_mill_property_contract(obj)
 
     def pocketInvertExtraOffset(self):
         return True
@@ -1115,6 +1176,13 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 error=True,
             )
 
+        if not self._validate_phase_4_material_state_mode(obj):
+            return self._abort_no_path(
+                obj,
+                _unsupported_material_state_message(),
+                error=True,
+            )
+
         if VolumeFaceMillUtils.feature_allowance_is_active(obj):
             return self._build_allowance_layer_paths(obj, getsim)
 
@@ -1146,6 +1214,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         self._set_stock_edge_clearance_default(obj, "StockEdgeClearanceY")
         obj.OptimizationMode = "None"
         obj.CuttingStrategy = _CUTTING_STRATEGY_DEFAULT
+        obj.MaterialStateMode = _MATERIAL_STATE_MODE_DEFAULT
         obj.FeatureAllowanceMode = _ALLOWANCE_MODE_DEFAULT
         obj.StockAllowanceMode = _ALLOWANCE_MODE_DEFAULT
 
@@ -1184,10 +1253,13 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         if prop == "CuttingStrategy":
             if (
                 not self._validate_phase_1_cutting_strategy(obj)
-                and not self._backfilling_property_contract
+                and not self._backfilling_volume_face_mill_property_contract
                 and "Restore" not in getattr(obj, "State", ())
             ):
                 Path.Log.error(_unsupported_cutting_strategy_message())
+
+        if prop == "MaterialStateMode":
+            pass
 
         if prop in {"BoundaryShape", "ProtectModel"}:
             self._force_compatibility_properties(obj)
@@ -1374,7 +1446,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         self._ensure_runtime_state()
         super().opOnDocumentRestored(obj)
         self._ensure_runtime_state()
-        self._backfill_allowance_property_contract(obj)
+        self._backfill_volume_face_mill_property_contract(obj)
 
 
 def SetupProperties():
@@ -1385,6 +1457,9 @@ def SetupProperties():
 
     if "CuttingStrategy" not in setup:
         setup.append("CuttingStrategy")
+
+    if "MaterialStateMode" not in setup:
+        setup.append("MaterialStateMode")
 
     for prop in (
         "ProtectSelectedFeatures",

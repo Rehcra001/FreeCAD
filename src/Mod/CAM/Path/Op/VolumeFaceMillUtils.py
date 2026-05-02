@@ -18,6 +18,71 @@ def find_job(obj):
     return PathUtils.findParentJob(obj)
 
 
+def job_model_group(obj):
+    """Return the parent Job model group as a list."""
+
+    job = find_job(obj)
+    if not job or not getattr(job, "Model", None):
+        return []
+
+    return list(getattr(job.Model, "Group", []) or [])
+
+
+def _direct_identity_candidates(doc_object):
+    """Return direct identity candidates for a selected document object."""
+
+    if doc_object is None:
+        return []
+
+    candidates = [doc_object]
+
+    for attribute in ("LinkedObject", "Source"):
+        candidate = getattr(doc_object, attribute, None)
+        if candidate is not None:
+            candidates.append(candidate)
+
+    unique_candidates = []
+    for candidate in candidates:
+        if any(candidate is existing for existing in unique_candidates):
+            continue
+        unique_candidates.append(candidate)
+
+    return unique_candidates
+
+
+def _job_model_member_identity_candidates(doc_object):
+    """Return identity candidates for a Job model member, including wrapped children."""
+
+    candidates = _direct_identity_candidates(doc_object)
+
+    for wrapped in list(getattr(doc_object, "Objects", []) or []):
+        if wrapped is not None:
+            candidates.extend(_direct_identity_candidates(wrapped))
+
+    unique_candidates = []
+    for candidate in candidates:
+        if any(candidate is existing for existing in unique_candidates):
+            continue
+        unique_candidates.append(candidate)
+
+    return unique_candidates
+
+
+def base_belongs_to_job_model(obj, base):
+    """Return True if base belongs to the parent Job model group."""
+
+    model_group = job_model_group(obj)
+    base_candidates = _direct_identity_candidates(base)
+
+    for model_member in model_group:
+        model_candidates = _job_model_member_identity_candidates(model_member)
+        for base_candidate in base_candidates:
+            if any(base_candidate is model_candidate for model_candidate in model_candidates):
+                return True
+
+    return False
+
+
 def has_valid_stock(obj):
     """Return True if obj has a parent Job with a valid stock shape."""
 
@@ -130,6 +195,24 @@ def selected_horizontal_faces(obj):
     return horizontal_faces
 
 
+def selected_model_horizontal_faces(obj):
+    """Return selected horizontal faces whose base object belongs to the Job model."""
+
+    horizontal_faces = []
+
+    for selected in iter_selected_subobjects(obj):
+        base = selected["base"]
+        shape = selected["shape"]
+
+        if not base_belongs_to_job_model(obj, base):
+            continue
+
+        if isinstance(shape, Part.Face) and is_horizontal_face(shape):
+            horizontal_faces.append(shape)
+
+    return horizontal_faces
+
+
 def has_selected_geometry(obj):
     """Return whether the operation has any readable selected base geometry."""
 
@@ -163,6 +246,15 @@ def allowance_values(obj):
     }
 
 
+def stock_edge_clearance_values(obj):
+    """Return non-negative stock-edge clearance values from the operation."""
+
+    return {
+        "x": allowance_distance_value(obj, "StockEdgeClearanceX"),
+        "y": allowance_distance_value(obj, "StockEdgeClearanceY"),
+    }
+
+
 def feature_allowance_is_active(obj, tolerance=1e-6):
     """Return whether non-zero feature allowance is active."""
 
@@ -171,11 +263,11 @@ def feature_allowance_is_active(obj, tolerance=1e-6):
 
 
 def resolve_target_faces_and_final_depth(obj, stock_shape, tolerance=1e-6):
-    """Return (target_faces, final_depth) from Base selection and stock extents."""
+    """Return (target_faces, final_depth) from model Base selection and stock extents."""
 
     stock_bb = stock_shape.BoundBox
     has_selection = has_selected_geometry(obj)
-    horizontal_faces = selected_horizontal_faces(obj)
+    horizontal_faces = selected_model_horizontal_faces(obj)
     allowances = allowance_values(obj)
 
     if horizontal_faces:
@@ -189,7 +281,7 @@ def resolve_target_faces_and_final_depth(obj, stock_shape, tolerance=1e-6):
     else:
         if has_selection:
             Path.Log.warning(
-                "No selected horizontal target face found; final depth defaults to stock bottom."
+                "No selected Job-model horizontal target face found; final depth defaults to stock bottom."
             )
         target_faces = []
         final_depth = stock_bb.ZMin + allowances["stock_z"]
@@ -460,20 +552,26 @@ def selected_keepout_shapes(obj, target_faces, depthparams):
     return keepout_shapes
 
 
-def effective_clear_edges(clear_edges, stock_allowance_xy, tolerance=1e-6):
-    """Return whether edge overhang may be used after stock allowance rules."""
+def effective_stock_edge_clearances(obj, tolerance=1e-6):
+    """Return effective X/Y stock-edge expansion distances."""
 
-    if clear_edges and stock_allowance_xy > tolerance:
+    if not getattr(obj, "ClearEdges", False):
+        return 0.0, 0.0
+
+    allowances = allowance_values(obj)
+    if allowances["stock_xy"] > tolerance:
         Path.Log.warning("ClearEdges is disabled when StockAllowanceXY is non-zero.")
-        return False
-    return clear_edges
+        return 0.0, 0.0
+
+    clearances = stock_edge_clearance_values(obj)
+    return max(0.0, clearances["x"]), max(0.0, clearances["y"])
 
 
 def build_boundary_volume(
     stock_shape,
     final_depth,
-    tool_radius,
-    clear_edges,
+    stock_edge_clearance_x=0.0,
+    stock_edge_clearance_y=0.0,
     stock_allowance_xy=0.0,
     z_margin=0.001,
     tolerance=1e-6,
@@ -491,10 +589,8 @@ def build_boundary_volume(
         Path.Log.warning("Stock allowance consumes all machinable stock boundary.")
         return None
 
-    allow_edge_overhang = clear_edges and math.isclose(
-        stock_allowance_xy, 0.0, rel_tol=0.0, abs_tol=tolerance
-    )
-    xy_margin = (tool_radius + 0.1) if allow_edge_overhang else 0.0
+    x_margin = max(0.0, stock_edge_clearance_x)
+    y_margin = max(0.0, stock_edge_clearance_y)
 
     z_min = max(min(final_depth, bb.ZMax), bb.ZMin)
     z_max = bb.ZMax
@@ -505,12 +601,12 @@ def build_boundary_volume(
         return None
 
     return Part.makeBox(
-        (x_max - x_min) + (2.0 * xy_margin),
-        (y_max - y_min) + (2.0 * xy_margin),
+        (x_max - x_min) + (2.0 * x_margin),
+        (y_max - y_min) + (2.0 * y_margin),
         height + z_margin,
         FreeCAD.Vector(
-            x_min - xy_margin,
-            y_min - xy_margin,
+            x_min - x_margin,
+            y_min - y_margin,
             z_min - z_margin,
         ),
     )
@@ -520,8 +616,8 @@ def build_layer_boundary_volume(
     stock_shape,
     layer_top_z,
     layer_bottom_z,
-    tool_radius,
-    clear_edges,
+    stock_edge_clearance_x=0.0,
+    stock_edge_clearance_y=0.0,
     stock_allowance_xy=0.0,
     z_margin=0.001,
     tolerance=1e-6,
@@ -539,10 +635,8 @@ def build_layer_boundary_volume(
         Path.Log.warning("Stock allowance consumes all machinable stock boundary.")
         return None
 
-    allow_edge_overhang = clear_edges and math.isclose(
-        stock_allowance_xy, 0.0, rel_tol=0.0, abs_tol=tolerance
-    )
-    xy_margin = (tool_radius + 0.1) if allow_edge_overhang else 0.0
+    x_margin = max(0.0, stock_edge_clearance_x)
+    y_margin = max(0.0, stock_edge_clearance_y)
 
     z_top = max(min(layer_top_z, bb.ZMax), bb.ZMin)
     z_bottom = max(min(layer_bottom_z, bb.ZMax), bb.ZMin)
@@ -551,12 +645,12 @@ def build_layer_boundary_volume(
 
     height = max(z_top - z_bottom, tolerance)
     return Part.makeBox(
-        (x_max - x_min) + (2.0 * xy_margin),
-        (y_max - y_min) + (2.0 * xy_margin),
+        (x_max - x_min) + (2.0 * x_margin),
+        (y_max - y_min) + (2.0 * y_margin),
         height + (2.0 * z_margin),
         FreeCAD.Vector(
-            x_min - xy_margin,
-            y_min - xy_margin,
+            x_min - x_margin,
+            y_min - y_margin,
             z_bottom - z_margin,
         ),
     )
@@ -875,9 +969,8 @@ def build_layered_allowance_removal_volume(
         Path.Log.warning("Allowance leaves no machinable stock depth.")
         return None
 
-    clear_edges = effective_clear_edges(
-        getattr(obj, "ClearEdges", False),
-        allowances["stock_xy"],
+    edge_clearance_x, edge_clearance_y = effective_stock_edge_clearances(
+        obj,
         tolerance=tolerance,
     )
     protected_shapes = build_protected_shapes(
@@ -913,8 +1006,8 @@ def build_layered_allowance_removal_volume(
             stock_shape=stock_shape,
             layer_top_z=layer_top_z,
             layer_bottom_z=layer_bottom_z,
-            tool_radius=tool_radius,
-            clear_edges=clear_edges,
+            stock_edge_clearance_x=edge_clearance_x,
+            stock_edge_clearance_y=edge_clearance_y,
             stock_allowance_xy=allowances["stock_xy"],
             tolerance=tolerance,
         )
@@ -1072,10 +1165,7 @@ def build_removal_volume(obj, model, tool_radius, depthparams):
 
     allowances = allowance_values(obj)
     target_faces, final_depth = resolve_target_faces_and_final_depth(obj, stock_shape)
-    clear_edges = effective_clear_edges(
-        getattr(obj, "ClearEdges", False),
-        allowances["stock_xy"],
-    )
+    edge_clearance_x, edge_clearance_y = effective_stock_edge_clearances(obj)
 
     if feature_allowance_is_active(obj):
         layer_volumes = build_allowance_layer_volumes(
@@ -1093,8 +1183,8 @@ def build_removal_volume(obj, model, tool_radius, depthparams):
     boundary = build_boundary_volume(
         stock_shape=stock_shape,
         final_depth=final_depth,
-        tool_radius=tool_radius,
-        clear_edges=clear_edges,
+        stock_edge_clearance_x=edge_clearance_x,
+        stock_edge_clearance_y=edge_clearance_y,
         stock_allowance_xy=allowances["stock_xy"],
     )
     if boundary is None:
@@ -1109,25 +1199,28 @@ def build_removal_volume(obj, model, tool_radius, depthparams):
 
     if protected is not None:
         try:
-            protected_overlap = boundary.common(protected)
-        except Exception as exc:
-            Path.Log.warning(
-                f"Failed to clip protected model/features to the removal volume: {exc}"
-            )
-            protected_overlap = protected
-
-        if _shape_has_volume(protected_overlap):
+            boundary = boundary.cut(protected)
+        except Exception:
             try:
-                boundary = _cut_protected_overlap(boundary, protected_overlap)
+                protected_overlap = boundary.common(protected)
             except Exception as exc:
-                Path.Log.error(f"Failed to subtract protected model/features from stock: {exc}")
-                return None
+                Path.Log.warning(
+                    f"Failed to clip protected model/features to the removal volume: {exc}"
+                )
+                protected_overlap = protected
+
+            if _shape_has_volume(protected_overlap):
+                try:
+                    boundary = _cut_protected_overlap(boundary, protected_overlap)
+                except Exception as exc:
+                    Path.Log.error(f"Failed to subtract protected model/features from stock: {exc}")
+                    return None
 
     exact_boundary = build_boundary_volume(
         stock_shape=stock_shape,
         final_depth=final_depth,
-        tool_radius=tool_radius,
-        clear_edges=clear_edges,
+        stock_edge_clearance_x=edge_clearance_x,
+        stock_edge_clearance_y=edge_clearance_y,
         stock_allowance_xy=allowances["stock_xy"],
         z_margin=0.0,
     )

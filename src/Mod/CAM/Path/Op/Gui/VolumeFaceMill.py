@@ -8,6 +8,7 @@ import Path.Op.Gui.Base as PathOpGui
 import Path.Op.Gui.PocketBase as PathPocketBaseGui
 import Path.Op.PocketBase as PathPocketBase
 import Path.Op.VolumeFaceMill as PathVolumeFaceMill
+import Path.Op.VolumeFaceMillUtils as VolumeFaceMillUtils
 
 from PySide.QtCore import QT_TRANSLATE_NOOP
 
@@ -71,7 +72,18 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             obj,
             "StockAllowanceZ",
         )
+        self.stockEdgeClearanceXSpinBox = PathGuiUtil.QuantitySpinBox(
+            self.form.stockEdgeClearanceX,
+            obj,
+            "StockEdgeClearanceX",
+        )
+        self.stockEdgeClearanceYSpinBox = PathGuiUtil.QuantitySpinBox(
+            self.form.stockEdgeClearanceY,
+            obj,
+            "StockEdgeClearanceY",
+        )
         self._applying_form_fields = False
+        self._edited_stock_edge_clearance_properties = set()
 
     def getForm(self):
         Path.Log.track()
@@ -119,6 +131,13 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         self.form.stockAllowanceLinkedFrame.setVisible(stock_linked)
         self.form.stockAllowanceIndependentFrame.setVisible(not stock_linked)
 
+    def _sync_stock_edge_clearance_widgets(self, obj):
+        """Enable edge-clearance editors only when ClearEdges is enabled."""
+
+        enabled = bool(obj.ClearEdges)
+        self.form.stockEdgeClearanceX.setEnabled(enabled)
+        self.form.stockEdgeClearanceY.setEnabled(enabled)
+
     def _update_allowance_widgets(self):
         """Refresh all allowance widgets from the bound properties."""
 
@@ -128,6 +147,95 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         self.stockAllowanceLinkedSpinBox.updateWidget()
         self.stockAllowanceXYSpinBox.updateWidget()
         self.stockAllowanceZSpinBox.updateWidget()
+        self.stockEdgeClearanceXSpinBox.updateWidget()
+        self.stockEdgeClearanceYSpinBox.updateWidget()
+
+    @staticmethod
+    def _widget_quantity_value(widget):
+        """Return the current numeric value from a quantity widget."""
+
+        try:
+            value = widget.property("rawValue")
+        except Exception:
+            value = getattr(widget, "value", None)
+
+        if value is None:
+            return None
+
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _property_expression(obj, prop_name):
+        """Return the expression bound to prop_name, or None if it is not expression-driven."""
+
+        for current_prop, expression in getattr(obj, "ExpressionEngine", ()):
+            if current_prop == prop_name:
+                return expression
+        return None
+
+    def _mark_stock_edge_clearance_property_edited(self, prop_name):
+        """Record that a stock-edge clearance field was explicitly edited by the user."""
+
+        self._edited_stock_edge_clearance_properties.add(prop_name)
+
+    def _apply_stock_edge_clearance_edit(self, prop_name):
+        """Capture the edited clearance field before pushing page values back to the model."""
+
+        self._mark_stock_edge_clearance_property_edited(prop_name)
+        self.pageGetFields()
+
+    def _update_stock_edge_clearance_property_from_form(self, obj, prop_name, widget):
+        """Write one stock-edge clearance field while clearing default expressions on edit."""
+
+        value = self._widget_quantity_value(widget)
+        if value is None:
+            return
+
+        expression = self._property_expression(obj, prop_name)
+        user_edited = prop_name in self._edited_stock_edge_clearance_properties
+
+        current = getattr(obj, prop_name, None)
+        current_value = getattr(current, "Value", current)
+        try:
+            current_value = float(current_value)
+        except Exception:
+            current_value = None
+
+        try:
+            if current_value is not None and Path.Geom.isRoughly(current_value, value):
+                if not (expression and user_edited):
+                    return
+
+            try:
+                obj.setExpression(prop_name, None)
+            except Exception:
+                pass
+
+            VolumeFaceMillUtils.set_distance_property(obj, prop_name, value)
+            if getattr(obj, "Proxy", None):
+                obj.Proxy.areaOpOnChanged(obj, prop_name)
+        finally:
+            if user_edited:
+                self._edited_stock_edge_clearance_properties.discard(prop_name)
+
+    def _update_stock_edge_clearance_properties_from_form(self, obj):
+        """Write both stock-edge clearance values back to the operation."""
+
+        self._update_stock_edge_clearance_property_from_form(
+            obj,
+            "StockEdgeClearanceX",
+            self.form.stockEdgeClearanceX,
+        )
+        self._update_stock_edge_clearance_property_from_form(
+            obj,
+            "StockEdgeClearanceY",
+            self.form.stockEdgeClearanceY,
+        )
+        self.stockEdgeClearanceXSpinBox.updateWidget()
+        self.stockEdgeClearanceYSpinBox.updateWidget()
 
     def _update_allowance_properties_from_form(self, obj):
         """Write active allowance UI values back to the operation."""
@@ -188,6 +296,8 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
 
             if obj.ClearEdges != self.form.clearEdges.isChecked():
                 obj.ClearEdges = self.form.clearEdges.isChecked()
+            self._update_stock_edge_clearance_properties_from_form(obj)
+            self._sync_stock_edge_clearance_widgets(obj)
 
             if obj.UseStartPoint != self.form.useStartPoint.isChecked():
                 obj.UseStartPoint = self.form.useStartPoint.isChecked()
@@ -220,6 +330,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         self.selectInComboBox(obj.StockAllowanceMode, self.form.stockAllowanceMode)
         self._update_allowance_widgets()
         self._sync_allowance_mode_widgets(obj)
+        self._sync_stock_edge_clearance_widgets(obj)
 
     def getSignalsForUpdate(self, obj):
         """Return signals that trigger task-panel updates."""
@@ -248,6 +359,17 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         signals.append(self.form.stockAllowanceZ.editingFinished)
         return signals
 
+    def registerSignalHandlers(self, obj):
+        """Register manual field handlers that need edit-context before updating the model."""
+
+        super().registerSignalHandlers(obj)
+        self.form.stockEdgeClearanceX.editingFinished.connect(
+            lambda: self._apply_stock_edge_clearance_edit("StockEdgeClearanceX")
+        )
+        self.form.stockEdgeClearanceY.editingFinished.connect(
+            lambda: self._apply_stock_edge_clearance_edit("StockEdgeClearanceY")
+        )
+
     def updateData(self, obj, prop):
         """Refresh the page when the edited operation changes."""
 
@@ -269,6 +391,8 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             "StockAllowanceMode",
             "StockAllowanceXY",
             "StockAllowanceZ",
+            "StockEdgeClearanceX",
+            "StockEdgeClearanceY",
             "UseStartPoint",
         }:
             self.setFields(obj)

@@ -47,6 +47,10 @@ _ALLOWANCE_DISTANCE_PROPERTIES = (
     "StockAllowanceXY",
     "StockAllowanceZ",
 )
+_STOCK_EDGE_CLEARANCE_PROPERTIES = (
+    "StockEdgeClearanceX",
+    "StockEdgeClearanceY",
+)
 _CUTTING_STRATEGY_DEFAULT = "StrictRaster"
 _CUTTING_STRATEGY_SUPPORTED_IN_PHASE_1 = {"StrictRaster"}
 _CUTTING_STRATEGY_FROM_CLEARING_PATTERN = {
@@ -194,6 +198,30 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             )
             added_properties.add("ClearEdges")
 
+        if not hasattr(obj, "StockEdgeClearanceX"):
+            obj.addProperty(
+                "App::PropertyDistance",
+                "StockEdgeClearanceX",
+                "Volume Face Mill",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Distance the tool center may overhang true stock exterior edges in X when ClearEdges is enabled.",
+                ),
+            )
+            added_properties.add("StockEdgeClearanceX")
+
+        if not hasattr(obj, "StockEdgeClearanceY"):
+            obj.addProperty(
+                "App::PropertyDistance",
+                "StockEdgeClearanceY",
+                "Volume Face Mill",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Distance the tool center may overhang true stock exterior edges in Y when ClearEdges is enabled.",
+                ),
+            )
+            added_properties.add("StockEdgeClearanceY")
+
         if not hasattr(obj, "OptimizationMode"):
             obj.addProperty(
                 "App::PropertyEnumeration",
@@ -305,6 +333,46 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         except Exception:
             return None
 
+    def _tool_radius_value(self):
+        """Return the active tool radius in model units, or 0.0 if unavailable."""
+
+        tool = getattr(self, "tool", None)
+        if tool is None:
+            return 0.0
+
+        try:
+            diameter = float(tool.Diameter)
+        except Exception:
+            try:
+                diameter = float(getattr(tool.Diameter, "Value", tool.Diameter))
+            except Exception:
+                diameter = 0.0
+
+        return max(0.0, diameter / 2.0)
+
+    def _default_stock_edge_clearance(self):
+        """Return the default stock-edge clearance distance."""
+
+        return self._tool_radius_value() + 0.1
+
+    def _set_stock_edge_clearance_default(self, obj, prop_name):
+        """Set the default stock-edge clearance expression or fallback numeric value."""
+
+        if not hasattr(obj, prop_name):
+            return
+
+        try:
+            obj.setExpression(prop_name, "OpToolDiameter / 2 + 0.1 mm")
+            return
+        except Exception:
+            pass
+
+        VolumeFaceMillUtils.set_distance_property(
+            obj,
+            prop_name,
+            self._default_stock_edge_clearance(),
+        )
+
     def _migrate_allowance_compatibility_properties(self, obj, added_properties):
         """Backfill new XY allowance props from any legacy X/Y prototype properties."""
 
@@ -349,6 +417,17 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         for distance_prop in _ALLOWANCE_DISTANCE_PROPERTIES:
             if distance_prop in added_properties and distance_prop not in migrated_properties:
                 VolumeFaceMillUtils.set_distance_property(obj, distance_prop, 0.0)
+
+    def _clamp_stock_edge_clearance_non_negative(self, obj, prop_name):
+        """Clamp stock-edge clearance to a non-negative value."""
+
+        value = self._distance_property_value(obj, prop_name)
+        if value is None or value >= 0.0:
+            return value
+
+        Path.Log.warning(f"{prop_name} cannot be negative; clamping to 0 mm.")
+        VolumeFaceMillUtils.set_distance_property(obj, prop_name, 0.0)
+        return 0.0
 
     def _clamp_allowance_non_negative(self, obj, prop_name):
         """Clamp a single allowance distance property to a non-negative value."""
@@ -492,6 +571,9 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         self._syncing_allowances = True
         try:
             added_properties = self._add_properties(obj)
+            for prop_name in _STOCK_EDGE_CLEARANCE_PROPERTIES:
+                if prop_name in added_properties:
+                    self._set_stock_edge_clearance_default(obj, prop_name)
             preserved_z_values = {
                 z_prop: self._distance_property_value(obj, z_prop)
                 for _mode_prop, _xy_prop, z_prop in _ALLOWANCE_GROUPS
@@ -1060,6 +1142,8 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         obj.ProtectSelectedFeatures = False
         obj.ClearEdges = False
+        self._set_stock_edge_clearance_default(obj, "StockEdgeClearanceX")
+        self._set_stock_edge_clearance_default(obj, "StockEdgeClearanceY")
         obj.OptimizationMode = "None"
         obj.CuttingStrategy = _CUTTING_STRATEGY_DEFAULT
         obj.FeatureAllowanceMode = _ALLOWANCE_MODE_DEFAULT
@@ -1110,6 +1194,11 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         if prop in _ALLOWANCE_MODE_PROPERTIES or prop in _ALLOWANCE_DISTANCE_PROPERTIES:
             self._handle_allowance_property_change(obj, prop)
+
+        if prop in _STOCK_EDGE_CLEARANCE_PROPERTIES:
+            self._clamp_stock_edge_clearance_non_negative(obj, prop)
+            if VolumeFaceMillUtils.has_valid_stock(obj):
+                self._sync_stock_depths(obj)
 
         if prop in {"Base", "ClearEdges", "ProtectSelectedFeatures"} or (
             prop in _ALLOWANCE_DISTANCE_PROPERTIES and not self._syncing_allowances
@@ -1300,6 +1389,8 @@ def SetupProperties():
     for prop in (
         "ProtectSelectedFeatures",
         "ClearEdges",
+        "StockEdgeClearanceX",
+        "StockEdgeClearanceY",
         "OptimizationMode",
         "FeatureAllowanceMode",
         "FeatureAllowanceXY",

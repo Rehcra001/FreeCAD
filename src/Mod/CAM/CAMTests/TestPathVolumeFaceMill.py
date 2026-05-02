@@ -44,6 +44,11 @@ class _FakeQuantityWidget:
 
     def __init__(self, value=0.0):
         self.value = float(value)
+        self.enabled = True
+        self.editingFinished = object()
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
 
 
 class _FakeQuantitySpinBox:
@@ -147,6 +152,11 @@ class TestPathVolumeFaceMill(PathTestBase):
         aux.Shape = Part.makeBox(size.x, size.y, size.z, origin)
         return aux
 
+    def _make_fixture_box(self, name, origin, size):
+        """Create an auxiliary non-model fixture object."""
+
+        return self._make_aux_box(name, origin, size)
+
     def _make_job_with_stock_and_model(self):
         model = self._make_model_with_boss()
         job = PathJob.Create("Job", [model], None)
@@ -202,6 +212,20 @@ class TestPathVolumeFaceMill(PathTestBase):
         model = self.doc.addObject("Part::Feature", "PlateModel")
         model.Shape = Part.makeBox(size.x, size.y, size.z, base)
         return model
+
+    def _make_plate_model_with_target_faces(self):
+        """Create Job model solids with horizontal faces that can validly set target depth."""
+
+        left = self.doc.addObject("Part::Feature", "LeftTargetModel")
+        left.Shape = Part.makeBox(10, 10, 5, FreeCAD.Vector(5, 5, 0))
+
+        right = self.doc.addObject("Part::Feature", "RightTargetModel")
+        right.Shape = Part.makeBox(10, 10, 5, FreeCAD.Vector(25, 5, 0))
+
+        high = self.doc.addObject("Part::Feature", "HighTargetModel")
+        high.Shape = Part.makeBox(10, 10, 12, FreeCAD.Vector(45, 5, 0))
+
+        return [left, right, high]
 
     def _make_full_plate_with_raised_feature_model(self):
         """Create a full-width plate with a raised protected feature above Z=0."""
@@ -361,6 +385,15 @@ class TestPathVolumeFaceMill(PathTestBase):
         for actual, expected in zip(z_order, expected_levels):
             self.assertAlmostEqual(actual, expected, delta=tolerance)
 
+    @staticmethod
+    def _expression_for_property(obj, prop_name):
+        """Return the expression currently bound to a property, or None if unbound."""
+
+        for current_prop, expression in getattr(obj, "ExpressionEngine", ()):
+            if current_prop == prop_name:
+                return expression
+        return None
+
     def _xy_inside_rect(self, x, y, xmin, xmax, ymin, ymax, tolerance=1e-6):
         """Return whether XY lies inside a rectangle."""
 
@@ -498,6 +531,7 @@ class TestPathVolumeFaceMill(PathTestBase):
 
         fake_path = types.ModuleType("Path")
         fake_path.__path__ = []
+        fake_path.Geom = Path.Geom
         fake_path.Log = types.SimpleNamespace(
             Level=types.SimpleNamespace(DEBUG=0, INFO=1),
             setLevel=lambda *args, **kwargs: None,
@@ -586,6 +620,7 @@ class TestPathVolumeFaceMill(PathTestBase):
             "Path.Op.Gui.PocketBase": fake_path_op_gui_pocket_base,
             "Path.Op.PocketBase": fake_path_op_pocket_base,
             "Path.Op.VolumeFaceMill": fake_path_op_volume_face_mill,
+            "Path.Op.VolumeFaceMillUtils": PathVolumeFaceMillUtils,
             "PySide": fake_pyside,
             "PySide.QtCore": fake_qtcore,
         }
@@ -704,24 +739,21 @@ class TestPathVolumeFaceMill(PathTestBase):
         )
 
     def test_lowest_selected_horizontal_face_sets_final_depth(self):
-        job, model = self._make_job_with_stock_and_model()
-        upper = self._make_aux_box(
-            "UpperTarget",
-            FreeCAD.Vector(5, 5, 0),
-            FreeCAD.Vector(10, 10, 12),
-        )
-        lower = self._make_aux_box(
-            "LowerTarget",
-            FreeCAD.Vector(20, 5, 0),
-            FreeCAD.Vector(10, 10, 5),
-        )
+        upper = self.doc.addObject("Part::Feature", "UpperTargetModel")
+        upper.Shape = Part.makeBox(10, 10, 12, FreeCAD.Vector(5, 5, 0))
+        lower = self.doc.addObject("Part::Feature", "LowerTargetModel")
+        lower.Shape = Part.makeBox(10, 10, 5, FreeCAD.Vector(20, 5, 0))
+        job = PathJob.Create("Job", [upper, lower], None)
+        job.GeometryTolerance.Value = 0.001
+        job.Stock = self._make_stock(job)
+        self.assertSuccessfulRecompute(self.doc)
         upper_top = self._highest_horizontal_face_name(upper.Shape)
         lower_top = self._highest_horizontal_face_name(lower.Shape)
 
         _job, _model, op = self._create_operation(
             name="lowest_selected_final_depth",
             job=job,
-            model=model,
+            model=lower,
             base=[(upper, [upper_top]), (lower, [lower_top])],
             step_down=5.0,
         )
@@ -730,15 +762,16 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertAlmostEqual(op.OpFinalDepth.Value, 5.0, places=6)
 
     def test_coplanar_lowest_faces_are_all_target_faces(self):
-        job, model = self._make_job_with_stock_and_model()
-        left = self._make_aux_box("LeftLow", FreeCAD.Vector(5, 5, 0), FreeCAD.Vector(10, 10, 5))
-        right = self._make_aux_box("RightLow", FreeCAD.Vector(20, 5, 0), FreeCAD.Vector(10, 10, 5))
-        high = self._make_aux_box("HighFace", FreeCAD.Vector(35, 5, 0), FreeCAD.Vector(10, 10, 12))
+        left, right, high = self._make_plate_model_with_target_faces()
+        job = PathJob.Create("Job", [left, right, high], None)
+        job.GeometryTolerance.Value = 0.001
+        job.Stock = self._make_stock(job)
+        self.assertSuccessfulRecompute(self.doc)
 
         _job, _model, op = self._create_operation(
             name="coplanar_lowest_faces",
             job=job,
-            model=model,
+            model=left,
             base=[
                 (left, [self._highest_horizontal_face_name(left.Shape)]),
                 (right, [self._highest_horizontal_face_name(right.Shape)]),
@@ -756,6 +789,108 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertEqual(len(target_faces), 2)
         for face in target_faces:
             self.assertAlmostEqual(PathVolumeFaceMillUtils.face_z(face), 5.0, places=6)
+
+    def test_base_belongs_to_job_model_accepts_wrapped_model_group_member(self):
+        model = self._make_model_with_boss()
+        wrapped_member = types.SimpleNamespace(
+            Objects=[model],
+            LinkedObject=None,
+            Source=None,
+        )
+        fake_job = types.SimpleNamespace(Model=types.SimpleNamespace(Group=[wrapped_member]))
+        fake_op = types.SimpleNamespace()
+
+        with mock.patch.object(PathVolumeFaceMillUtils, "find_job", return_value=fake_job):
+            self.assertEqual(PathVolumeFaceMillUtils.job_model_group(fake_op), [wrapped_member])
+            self.assertTrue(PathVolumeFaceMillUtils.base_belongs_to_job_model(fake_op, model))
+
+    def test_base_belongs_to_job_model_rejects_non_model_container_that_wraps_model(self):
+        model = self._make_model_with_boss()
+        wrapped_member = types.SimpleNamespace(
+            Objects=[model],
+            LinkedObject=None,
+            Source=None,
+        )
+        non_model_container = types.SimpleNamespace(
+            Objects=[model],
+            LinkedObject=None,
+            Source=None,
+        )
+        fake_job = types.SimpleNamespace(Model=types.SimpleNamespace(Group=[wrapped_member]))
+        fake_op = types.SimpleNamespace()
+
+        with mock.patch.object(PathVolumeFaceMillUtils, "find_job", return_value=fake_job):
+            self.assertFalse(
+                PathVolumeFaceMillUtils.base_belongs_to_job_model(fake_op, non_model_container)
+            )
+
+    def test_selected_model_horizontal_faces_ignore_non_model_container_wrapping_model(self):
+        model = self._make_model_with_boss()
+        target_face_name = self._highest_horizontal_face_name(model.Shape)
+        target_face = model.Shape.getElement(target_face_name)
+        wrapped_member = types.SimpleNamespace(
+            Objects=[model],
+            LinkedObject=None,
+            Source=None,
+        )
+        non_model_container = types.SimpleNamespace(
+            Objects=[model],
+            LinkedObject=None,
+            Source=None,
+        )
+        fake_job = types.SimpleNamespace(Model=types.SimpleNamespace(Group=[wrapped_member]))
+        fake_op = types.SimpleNamespace()
+        fake_selection = [{"base": non_model_container, "shape": target_face}]
+
+        with mock.patch.object(PathVolumeFaceMillUtils, "find_job", return_value=fake_job):
+            with mock.patch.object(
+                PathVolumeFaceMillUtils,
+                "iter_selected_subobjects",
+                return_value=fake_selection,
+            ):
+                self.assertEqual(
+                    PathVolumeFaceMillUtils.selected_model_horizontal_faces(fake_op), []
+                )
+
+    def test_selected_model_horizontal_face_sets_final_depth(self):
+        model = self._make_full_plate_model(
+            size=FreeCAD.Vector(100, 100, 10),
+            base=FreeCAD.Vector(0, 0, 5),
+        )
+        job = self._make_job_with_custom_stock_and_model(model, FreeCAD.Vector(100, 100, 30))
+        target_face = self._highest_horizontal_face_name(model.Shape)
+
+        _job, _model, op = self._create_operation(
+            name="model_face_sets_depth",
+            job=job,
+            model=model,
+            base=[(model, [target_face])],
+            step_down=5.0,
+        )
+
+        expected_z = PathVolumeFaceMillUtils.face_z(model.Shape.getElement(target_face))
+        self.assertAlmostEqual(op.OpFinalDepth.Value, expected_z, places=6)
+
+    def test_model_and_fixture_selected_model_face_controls_depth(self):
+        job, model = self._make_job_with_stock_and_model()
+        model_top = self._highest_horizontal_face_name(model.Shape)
+        fixture = self._make_fixture_box(
+            "FixtureHigher",
+            FreeCAD.Vector(10, 10, 15),
+            FreeCAD.Vector(20, 20, 3),
+        )
+        fixture_top = self._highest_horizontal_face_name(fixture.Shape)
+
+        _job, _model, op = self._create_operation(
+            name="model_and_fixture_depth",
+            job=job,
+            model=model,
+            base=[(fixture, [fixture_top]), (model, [model_top])],
+            step_down=5.0,
+        )
+
+        expected_z = PathVolumeFaceMillUtils.face_z(model.Shape.getElement(model_top))
+        self.assertAlmostEqual(op.OpFinalDepth.Value, expected_z, places=6)
 
     def test_no_horizontal_face_defaults_to_stock_bottom(self):
         job, model = self._make_job_with_stock_and_model()
@@ -844,6 +979,31 @@ class TestPathVolumeFaceMill(PathTestBase):
             list(op.getEnumerationsOfProperty("StockAllowanceMode")),
             ["Linked", "Independent"],
         )
+
+    def test_stock_edge_clearance_properties_exist(self):
+        _job, _model, op = self._create_operation(name="edge_clearance_props")
+
+        self.assertTrue(hasattr(op, "StockEdgeClearanceX"))
+        self.assertTrue(hasattr(op, "StockEdgeClearanceY"))
+
+    def test_stock_edge_clearance_defaults_to_tool_radius_plus_margin(self):
+        _job, _model, op = self._create_operation(
+            name="edge_clearance_defaults",
+            tool_diameter=20.0,
+        )
+
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        expected = 10.0 + 0.1
+        self.assertAlmostEqual(op.StockEdgeClearanceX.Value, expected, delta=1e-6)
+        self.assertAlmostEqual(op.StockEdgeClearanceY.Value, expected, delta=1e-6)
+
+    def test_stock_edge_clearance_setup_properties(self):
+        setup_properties = PathVolumeFaceMill.SetupProperties()
+
+        self.assertIn("StockEdgeClearanceX", setup_properties)
+        self.assertIn("StockEdgeClearanceY", setup_properties)
+        self.assertIn("ClearEdges", setup_properties)
 
     def test_cutting_strategy_property_defaults_to_strict_raster(self):
         _job, _model, op = self._create_operation(name="cutting_strategy_defaults")
@@ -1235,6 +1395,15 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertAlmostEqual(op.StockAllowanceXY.Value, 0.0, places=6)
         self.assertAlmostEqual(op.StockAllowanceZ.Value, 0.0, places=6)
 
+    def test_negative_stock_edge_clearances_are_clamped_non_negative(self):
+        _job, _model, op = self._create_operation(name="negative_edge_clearance_clamp")
+
+        self._set_allowance_distance(op, "StockEdgeClearanceX", -1.0)
+        self._set_allowance_distance(op, "StockEdgeClearanceY", -2.0)
+
+        self.assertAlmostEqual(op.StockEdgeClearanceX.Value, 0.0, places=6)
+        self.assertAlmostEqual(op.StockEdgeClearanceY.Value, 0.0, places=6)
+
     def test_allowance_ui_panel_exposes_linked_and_independent_contract_widgets(self):
         ui_path = self._volume_face_mill_ui_path()
         root = ET.parse(ui_path).getroot()
@@ -1260,6 +1429,19 @@ class TestPathVolumeFaceMill(PathTestBase):
             "stockAllowanceZ",
         ):
             self.assertIn(widget_name, widget_names)
+
+    def test_volume_face_mill_ui_has_stock_edge_clearance_widgets(self):
+        ui_path = self._volume_face_mill_ui_path()
+        root = ET.parse(ui_path).getroot()
+
+        widget_names = {
+            widget.attrib.get("name") for widget in root.iter("widget") if widget.attrib.get("name")
+        }
+
+        self.assertIn("stockEdgeClearanceX", widget_names)
+        self.assertIn("stockEdgeClearanceY", widget_names)
+        self.assertIn("stockEdgeClearanceX_label", widget_names)
+        self.assertIn("stockEdgeClearanceY_label", widget_names)
 
     def test_allowance_ui_tooltips_describe_job_axes_and_xy_contract(self):
         ui_path = self._volume_face_mill_ui_path()
@@ -1298,9 +1480,15 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertIn("job/world XY stock boundary", tooltips["stockAllowanceXY"])
         self.assertIn("stock/world-Z oriented", tooltips["optimizationMode"])
         self.assertIn(
-            "Volume Face Mill uses the Job stock extents as its machining boundary in Job/world XY.",
+            "X and Y overhang distances are controlled by the edge clearance fields.",
             tooltips["clearEdges"],
         )
+        self.assertIn(
+            "This does not override stock allowance material-to-leave.",
+            tooltips["clearEdges"],
+        )
+        self.assertIn("tool radius plus 0.1 mm", tooltips["stockEdgeClearanceX"])
+        self.assertIn("tool radius plus 0.1 mm", tooltips["stockEdgeClearanceY"])
         self.assertIn(
             "Selected geometry does not redefine the stock boundary.",
             tooltips["protectSelectedFeatures"],
@@ -1348,6 +1536,8 @@ class TestPathVolumeFaceMill(PathTestBase):
             stockAllowanceLinked=_FakeQuantityWidget(0.75),
             stockAllowanceXY=_FakeQuantityWidget(7.0),
             stockAllowanceZ=_FakeQuantityWidget(6.0),
+            stockEdgeClearanceX=_FakeQuantityWidget(0.0),
+            stockEdgeClearanceY=_FakeQuantityWidget(0.0),
         )
         controller.initPage(op)
         controller._update_allowance_properties_from_form(op)
@@ -1382,6 +1572,8 @@ class TestPathVolumeFaceMill(PathTestBase):
             stockAllowanceLinked=_FakeQuantityWidget(0.0),
             stockAllowanceXY=_FakeQuantityWidget(1.25),
             stockAllowanceZ=_FakeQuantityWidget(0.5),
+            stockEdgeClearanceX=_FakeQuantityWidget(0.0),
+            stockEdgeClearanceY=_FakeQuantityWidget(0.0),
         )
         controller.initPage(op)
 
@@ -1432,6 +1624,8 @@ class TestPathVolumeFaceMill(PathTestBase):
             stockAllowanceLinked=_FakeQuantityWidget(8.0),
             stockAllowanceXY=_FakeQuantityWidget(1.25),
             stockAllowanceZ=_FakeQuantityWidget(0.5),
+            stockEdgeClearanceX=_FakeQuantityWidget(0.0),
+            stockEdgeClearanceY=_FakeQuantityWidget(0.0),
         )
         controller.initPage(op)
 
@@ -1450,6 +1644,73 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertAlmostEqual(op.FeatureAllowanceZ.Value, 3.5, places=6)
         self.assertAlmostEqual(op.StockAllowanceXY.Value, 0.75, places=6)
         self.assertAlmostEqual(op.StockAllowanceZ.Value, 0.75, places=6)
+
+    def test_stock_edge_clearance_widgets_follow_clear_edges_toggle(self):
+        _job, _model, op = self._create_operation(name="edge_clearance_widget_toggle")
+        gui_module = self._load_headless_volume_face_mill_gui_module()
+        controller = gui_module.TaskPanelOpPage.__new__(gui_module.TaskPanelOpPage)
+        controller.form = types.SimpleNamespace(
+            featureAllowanceMode=_FakeComboBox("Linked"),
+            stockAllowanceMode=_FakeComboBox("Linked"),
+            featureAllowanceLinkedFrame=_FakeFrame(),
+            featureAllowanceIndependentFrame=_FakeFrame(),
+            stockAllowanceLinkedFrame=_FakeFrame(),
+            stockAllowanceIndependentFrame=_FakeFrame(),
+            featureAllowanceLinked=_FakeQuantityWidget(0.0),
+            featureAllowanceXY=_FakeQuantityWidget(0.0),
+            featureAllowanceZ=_FakeQuantityWidget(0.0),
+            stockAllowanceLinked=_FakeQuantityWidget(0.0),
+            stockAllowanceXY=_FakeQuantityWidget(0.0),
+            stockAllowanceZ=_FakeQuantityWidget(0.0),
+            stockEdgeClearanceX=_FakeQuantityWidget(0.0),
+            stockEdgeClearanceY=_FakeQuantityWidget(0.0),
+        )
+        controller.initPage(op)
+
+        op.ClearEdges = False
+        controller._sync_stock_edge_clearance_widgets(op)
+        self.assertFalse(controller.form.stockEdgeClearanceX.enabled)
+        self.assertFalse(controller.form.stockEdgeClearanceY.enabled)
+
+        op.ClearEdges = True
+        controller._sync_stock_edge_clearance_widgets(op)
+        self.assertTrue(controller.form.stockEdgeClearanceX.enabled)
+        self.assertTrue(controller.form.stockEdgeClearanceY.enabled)
+
+    def test_same_value_stock_edge_clearance_edit_clears_only_edited_axis_expression(self):
+        _job, _model, op = self._create_operation(name="edge_clearance_same_value_edit")
+        gui_module = self._load_headless_volume_face_mill_gui_module()
+        controller = gui_module.TaskPanelOpPage.__new__(gui_module.TaskPanelOpPage)
+        controller.form = types.SimpleNamespace(
+            featureAllowanceMode=_FakeComboBox("Linked"),
+            stockAllowanceMode=_FakeComboBox("Linked"),
+            featureAllowanceLinkedFrame=_FakeFrame(),
+            featureAllowanceIndependentFrame=_FakeFrame(),
+            stockAllowanceLinkedFrame=_FakeFrame(),
+            stockAllowanceIndependentFrame=_FakeFrame(),
+            featureAllowanceLinked=_FakeQuantityWidget(0.0),
+            featureAllowanceXY=_FakeQuantityWidget(0.0),
+            featureAllowanceZ=_FakeQuantityWidget(0.0),
+            stockAllowanceLinked=_FakeQuantityWidget(0.0),
+            stockAllowanceXY=_FakeQuantityWidget(0.0),
+            stockAllowanceZ=_FakeQuantityWidget(0.0),
+            stockEdgeClearanceX=_FakeQuantityWidget(op.StockEdgeClearanceX.Value),
+            stockEdgeClearanceY=_FakeQuantityWidget(op.StockEdgeClearanceY.Value),
+        )
+        controller.initPage(op)
+
+        self.assertIsNotNone(self._expression_for_property(op, "StockEdgeClearanceX"))
+        self.assertIsNotNone(self._expression_for_property(op, "StockEdgeClearanceY"))
+
+        original_x = op.StockEdgeClearanceX.Value
+        original_y = op.StockEdgeClearanceY.Value
+        controller._mark_stock_edge_clearance_property_edited("StockEdgeClearanceX")
+        controller._update_stock_edge_clearance_properties_from_form(op)
+
+        self.assertIsNone(self._expression_for_property(op, "StockEdgeClearanceX"))
+        self.assertIsNotNone(self._expression_for_property(op, "StockEdgeClearanceY"))
+        self.assertAlmostEqual(op.StockEdgeClearanceX.Value, original_x, places=6)
+        self.assertAlmostEqual(op.StockEdgeClearanceY.Value, original_y, places=6)
 
     def test_gui_update_data_does_not_refresh_while_applying_form_fields(self):
         module = self._load_headless_volume_face_mill_gui_module()
@@ -1518,25 +1779,75 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertAlmostEqual(op.FinalDepth.Value, 10.0, places=6)
         self._assert_has_z_level(self._cutting_z_levels(self._cutting_moves(op.Path)), 10.0)
 
-    def test_translated_horizontal_face_sets_final_depth(self):
+    def test_selected_fixture_horizontal_face_does_not_set_final_depth(self):
         job, model = self._make_job_with_stock_and_model()
-        target = self._make_aux_box(
-            "TranslatedTargetFace",
+        fixture = self._make_fixture_box(
+            "Fixture",
             FreeCAD.Vector(23.5, 41.25, 0.0),
             FreeCAD.Vector(17.0, 13.0, 8.0),
         )
-        target_top = self._highest_horizontal_face_name(target.Shape)
+        fixture_top = self._highest_horizontal_face_name(fixture.Shape)
 
         _job, _model, op = self._create_operation(
-            name="translated_horizontal_face_depth",
+            name="fixture_face_does_not_set_depth",
             job=job,
             model=model,
-            base=[(target, [target_top])],
+            base=[(fixture, [fixture_top])],
             step_down=4.0,
         )
 
-        self.assertAlmostEqual(op.OpFinalDepth.Value, 8.0, places=6)
-        self.assertAlmostEqual(op.FinalDepth.Value, 8.0, places=6)
+        stock_bb = job.Stock.Shape.BoundBox
+        self.assertAlmostEqual(op.OpFinalDepth.Value, stock_bb.ZMin, places=6)
+        self.assertAlmostEqual(op.FinalDepth.Value, stock_bb.ZMin, places=6)
+
+    def test_fixture_selected_face_becomes_keepout_when_protected(self):
+        job, model = self._make_job_with_stock_and_model()
+        fixture = self._make_fixture_box(
+            "ProtectedFixture",
+            FreeCAD.Vector(20, 20, 0),
+            FreeCAD.Vector(20, 20, 15),
+        )
+        fixture_top = self._highest_horizontal_face_name(fixture.Shape)
+
+        _job, _model, op = self._create_operation(
+            name="fixture_keepout_true",
+            job=job,
+            model=model,
+            base=[(fixture, [fixture_top])],
+            protect_selected_features=True,
+            step_down=5.0,
+        )
+
+        removal = PathVolumeFaceMillUtils.build_removal_volume(
+            obj=op,
+            model=job.Model.Group,
+            tool_radius=self._tool_radius(op),
+            depthparams=None,
+        )
+
+        overlap = removal.common(fixture.Shape)
+        self.assertLessEqual(getattr(overlap, "Volume", 0.0), 1e-6)
+
+    def test_fixture_selection_ignored_when_protect_selected_features_false(self):
+        job, model = self._make_job_with_stock_and_model()
+        fixture = self._make_fixture_box(
+            "UnprotectedFixture",
+            FreeCAD.Vector(20, 20, 0),
+            FreeCAD.Vector(20, 20, 15),
+        )
+        fixture_top = self._highest_horizontal_face_name(fixture.Shape)
+
+        _job, _model, op = self._create_operation(
+            name="fixture_keepout_false",
+            job=job,
+            model=model,
+            base=[(fixture, [fixture_top])],
+            protect_selected_features=False,
+            step_down=5.0,
+        )
+
+        stock_bb = job.Stock.Shape.BoundBox
+        self.assertAlmostEqual(op.OpFinalDepth.Value, stock_bb.ZMin, places=6)
 
     def test_is_horizontal_face_uses_face_parameter_midpoint(self):
         shape = Part.makeBox(17.0, 13.0, 8.0, FreeCAD.Vector(23.5, 41.25, 0.0))
@@ -2474,6 +2785,107 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertLessEqual(max(z_levels), op.StartDepth.Value + 1e-6)
         self.assertLess(max(z_levels), op.StartDepth.Value - 1e-6)
         self._assert_has_z_level(z_levels, op.StartDepth.Value - op.StepDown.Value)
+
+    def test_clear_edges_false_ignores_edge_clearance_values(self):
+        job, _model, op = self._create_operation(name="edge_clearance_disabled")
+        op.ClearEdges = False
+        self._set_allowance_distance(op, "StockEdgeClearanceX", 25.0)
+        self._set_allowance_distance(op, "StockEdgeClearanceY", 30.0)
+
+        removal = PathVolumeFaceMillUtils.build_removal_volume(
+            obj=op,
+            model=job.Model.Group,
+            tool_radius=self._tool_radius(op),
+            depthparams=None,
+        )
+
+        stock_bb = job.Stock.Shape.BoundBox
+        removal_bb = removal.BoundBox
+        self.assertAlmostEqual(removal_bb.XMin, stock_bb.XMin, places=6)
+        self.assertAlmostEqual(removal_bb.XMax, stock_bb.XMax, places=6)
+        self.assertAlmostEqual(removal_bb.YMin, stock_bb.YMin, places=6)
+        self.assertAlmostEqual(removal_bb.YMax, stock_bb.YMax, places=6)
+
+    def test_clear_edges_x_clearance_expands_x_only(self):
+        job, _model, op = self._create_operation(name="edge_clearance_x_only")
+        op.ClearEdges = True
+        self._set_allowance_distance(op, "StockEdgeClearanceX", 7.0)
+        self._set_allowance_distance(op, "StockEdgeClearanceY", 0.0)
+
+        removal = PathVolumeFaceMillUtils.build_removal_volume(
+            obj=op,
+            model=job.Model.Group,
+            tool_radius=self._tool_radius(op),
+            depthparams=None,
+        )
+
+        stock_bb = job.Stock.Shape.BoundBox
+        removal_bb = removal.BoundBox
+        self.assertAlmostEqual(removal_bb.XMin, stock_bb.XMin - 7.0, places=6)
+        self.assertAlmostEqual(removal_bb.XMax, stock_bb.XMax + 7.0, places=6)
+        self.assertAlmostEqual(removal_bb.YMin, stock_bb.YMin, places=6)
+        self.assertAlmostEqual(removal_bb.YMax, stock_bb.YMax, places=6)
+
+    def test_clear_edges_y_clearance_expands_y_only(self):
+        job, _model, op = self._create_operation(name="edge_clearance_y_only")
+        op.ClearEdges = True
+        self._set_allowance_distance(op, "StockEdgeClearanceX", 0.0)
+        self._set_allowance_distance(op, "StockEdgeClearanceY", 9.0)
+
+        removal = PathVolumeFaceMillUtils.build_removal_volume(
+            obj=op,
+            model=job.Model.Group,
+            tool_radius=self._tool_radius(op),
+            depthparams=None,
+        )
+
+        stock_bb = job.Stock.Shape.BoundBox
+        removal_bb = removal.BoundBox
+        self.assertAlmostEqual(removal_bb.XMin, stock_bb.XMin, places=6)
+        self.assertAlmostEqual(removal_bb.XMax, stock_bb.XMax, places=6)
+        self.assertAlmostEqual(removal_bb.YMin, stock_bb.YMin - 9.0, places=6)
+        self.assertAlmostEqual(removal_bb.YMax, stock_bb.YMax + 9.0, places=6)
+
+    def test_clear_edges_xy_clearances_can_differ(self):
+        job, _model, op = self._create_operation(name="edge_clearance_xy_different")
+        op.ClearEdges = True
+        self._set_allowance_distance(op, "StockEdgeClearanceX", 4.0)
+        self._set_allowance_distance(op, "StockEdgeClearanceY", 11.0)
+
+        removal = PathVolumeFaceMillUtils.build_removal_volume(
+            obj=op,
+            model=job.Model.Group,
+            tool_radius=self._tool_radius(op),
+            depthparams=None,
+        )
+
+        stock_bb = job.Stock.Shape.BoundBox
+        removal_bb = removal.BoundBox
+        self.assertAlmostEqual(removal_bb.XMin, stock_bb.XMin - 4.0, places=6)
+        self.assertAlmostEqual(removal_bb.XMax, stock_bb.XMax + 4.0, places=6)
+        self.assertAlmostEqual(removal_bb.YMin, stock_bb.YMin - 11.0, places=6)
+        self.assertAlmostEqual(removal_bb.YMax, stock_bb.YMax + 11.0, places=6)
+
+    def test_stock_allowance_disables_stock_edge_clearance_expansion(self):
+        job, _model, op = self._create_operation(name="stock_allowance_blocks_edge_clearance")
+        op.ClearEdges = True
+        self._set_allowance_distance(op, "StockEdgeClearanceX", 10.0)
+        self._set_allowance_distance(op, "StockEdgeClearanceY", 10.0)
+        self._set_allowance_distance(op, "StockAllowanceXY", 2.0)
+
+        removal = PathVolumeFaceMillUtils.build_removal_volume(
+            obj=op,
+            model=job.Model.Group,
+            tool_radius=self._tool_radius(op),
+            depthparams=None,
+        )
+
+        stock_bb = job.Stock.Shape.BoundBox
+        removal_bb = removal.BoundBox
+        self.assertAlmostEqual(removal_bb.XMin, stock_bb.XMin + 2.0, places=6)
+        self.assertAlmostEqual(removal_bb.XMax, stock_bb.XMax - 2.0, places=6)
+        self.assertAlmostEqual(removal_bb.YMin, stock_bb.YMin + 2.0, places=6)
+        self.assertAlmostEqual(removal_bb.YMax, stock_bb.YMax - 2.0, places=6)
 
     def test_clear_edges_false_keeps_tool_inside_stock_extents(self):
         _job, _model, op = self._create_operation(

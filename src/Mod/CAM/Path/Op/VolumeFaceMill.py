@@ -56,9 +56,6 @@ _CUTTING_STRATEGY_FROM_CLEARING_PATTERN = {
     "Offset": "OffsetLoops",
     "ZigZagOffset": "SquareSpiral",
 }
-_CUTTING_STRATEGY_PHASE_1_COMPATIBILITY_CLEARING_PATTERN = {
-    "StrictRaster": "ZigZag",
-}
 _CUTTING_STRATEGY_PHASE_1_POCKET_MODE = {
     "StrictRaster": 1,
 }
@@ -75,46 +72,6 @@ def _unsupported_cutting_strategy_message():
         "CAM_VolumeFaceMill",
         "Selected Volume Face Mill cutting strategy is not implemented yet.",
     )
-
-
-class _CompatibilityPropertyView:
-    """Proxy document-object access while overriding transient compatibility values."""
-
-    __slots__ = ("_obj", "_overrides")
-
-    def __init__(self, obj, overrides):
-        object.__setattr__(self, "_obj", obj)
-        object.__setattr__(self, "_overrides", dict(overrides))
-
-    def __getattr__(self, name):
-        overrides = object.__getattribute__(self, "_overrides")
-        if name in overrides:
-            return overrides[name]
-        return getattr(object.__getattribute__(self, "_obj"), name)
-
-    def __setattr__(self, name, value):
-        if name in self.__slots__:
-            object.__setattr__(self, name, value)
-            return
-
-        overrides = object.__getattribute__(self, "_overrides")
-        if name in overrides:
-            overrides[name] = value
-            return
-
-        setattr(object.__getattribute__(self, "_obj"), name, value)
-
-    def __delattr__(self, name):
-        if name in self.__slots__:
-            object.__delattr__(self, name)
-            return
-
-        overrides = object.__getattribute__(self, "_overrides")
-        if name in overrides:
-            del overrides[name]
-            return
-
-        delattr(object.__getattribute__(self, "_obj"), name)
 
 
 class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
@@ -516,26 +473,6 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             obj.CuttingStrategy = mapped_value
         else:
             obj.CuttingStrategy = _CUTTING_STRATEGY_DEFAULT
-
-    def _compatibility_clearing_pattern_for_strategy(self, obj):
-        """Return the transient compatibility clearing pattern for execution."""
-
-        if not hasattr(obj, "CuttingStrategy"):
-            return None
-
-        return _CUTTING_STRATEGY_PHASE_1_COMPATIBILITY_CLEARING_PATTERN.get(obj.CuttingStrategy)
-
-    def _execution_view(self, obj):
-        """Return an execution-time view with canonical compatibility values."""
-
-        compatibility_pattern = self._compatibility_clearing_pattern_for_strategy(obj)
-        if compatibility_pattern is None:
-            return obj
-
-        return _CompatibilityPropertyView(
-            obj,
-            {"ClearingPattern": compatibility_pattern},
-        )
 
     def _validate_phase_1_cutting_strategy(self, obj):
         """Return True if the selected strategy is allowed in the current implementation phase."""
@@ -1096,13 +1033,11 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 error=True,
             )
 
-        execution_obj = self._execution_view(obj)
-
-        if VolumeFaceMillUtils.feature_allowance_is_active(execution_obj):
-            return self._build_allowance_layer_paths(execution_obj, getsim)
+        if VolumeFaceMillUtils.feature_allowance_is_active(obj):
+            return self._build_allowance_layer_paths(obj, getsim)
 
         self._pending_standard_abort = None
-        result = PathAreaOp.ObjectOp.opExecute(self, execution_obj, getsim)
+        result = PathAreaOp.ObjectOp.opExecute(self, obj, getsim)
         if self._pending_standard_abort is not None:
             message, error, preserve_removalshape = self._pending_standard_abort
             self._pending_standard_abort = None
@@ -1327,6 +1262,9 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         obj.MinTravel = obj.OptimizationMode == "MinTravel"
         params = super().areaOpPathParams(obj, isHole)
+
+        if getattr(obj, "CuttingStrategy", None) == "StrictRaster":
+            params.pop("sort_mode", None)
 
         if obj.OptimizationMode == "MinTravel":
             if obj.UseStartPoint and obj.StartPoint is not None:

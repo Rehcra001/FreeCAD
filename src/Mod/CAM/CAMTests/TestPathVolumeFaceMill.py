@@ -975,15 +975,11 @@ class TestPathVolumeFaceMill(PathTestBase):
             op.CuttingStrategy = "StrictRaster"
             op.Proxy.radius = self._tool_radius(op)
             self.assertEqual(op.ClearingPattern, clearing_pattern)
-            self.assertEqual(
-                op.Proxy._compatibility_clearing_pattern_for_strategy(op),
-                "ZigZag",
-            )
-
-            execution_obj = op.Proxy._execution_view(op)
-            self.assertEqual(execution_obj.ClearingPattern, "ZigZag")
             self.assertEqual(op.Proxy.areaOpAreaParams(op, False)["PocketMode"], 1)
-            self.assertEqual(op.Proxy.areaOpAreaParams(execution_obj, False)["PocketMode"], 1)
+
+            path_params = op.Proxy.areaOpPathParams(op, False)
+            if clearing_pattern in {"Offset", "ZigZagOffset"}:
+                self.assertNotIn("sort_mode", path_params)
 
     def test_unimplemented_cutting_strategy_aborts_safely(self):
         _job, _model, op = self._create_operation(name="unimplemented_strategy")

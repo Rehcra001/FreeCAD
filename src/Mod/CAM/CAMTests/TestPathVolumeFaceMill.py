@@ -1970,6 +1970,51 @@ class TestPathVolumeFaceMill(PathTestBase):
         )
         self.assertGreater(getattr(op_allow.removalshape.common(clear_probe), "Volume", 0.0), 1e-6)
 
+    def test_feature_xy_allowance_with_zigzag_offset_generates_layer_paths(self):
+        """Regression test for valid allowance layers skipped as having no cutting moves."""
+
+        model = self._make_full_plate_model(
+            size=FreeCAD.Vector(550, 300, 25),
+            base=FreeCAD.Vector(0, 0, -25),
+        )
+
+        job = self._make_job_with_custom_stock_and_model(
+            model,
+            FreeCAD.Vector(550, 300, 50),
+            FreeCAD.Vector(0, 0, -25),
+        )
+
+        target_face = self._highest_horizontal_face_name(model.Shape)
+
+        _job, _model, op = self._create_operation(
+            name="feature_xy_allowance_zigzag_offset",
+            job=job,
+            model=model,
+            base=[(model, [target_face])],
+            step_down=5.0,
+            clear_edges=True,
+            clearing_pattern="ZigZagOffset",
+            tool_diameter=63.0,
+        )
+
+        self._set_allowance_mode(op, "FeatureAllowanceMode", "Independent")
+        self._set_allowance_distance(op, "FeatureAllowanceXY", 2.0)
+        self._set_allowance_distance(op, "FeatureAllowanceZ", 0.0)
+
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        cutting_moves = self._cutting_moves(op.Path)
+        self.assertGreater(
+            len(cutting_moves),
+            0,
+            "FeatureAllowanceXY with ZigZagOffset must generate cutting moves.",
+        )
+
+        z_levels = self._cutting_z_levels(cutting_moves)
+
+        for expected_z in (0.0, 5.0, 10.0, 15.0, 20.0):
+            self._assert_has_z_level(z_levels, expected_z)
+
     def test_feature_allowance_xy_expands_drafted_model_keepout_laterally(self):
         model = self._make_drafted_model()
         job = self._make_job_with_custom_stock_and_model(model, FreeCAD.Vector(100, 100, 46))

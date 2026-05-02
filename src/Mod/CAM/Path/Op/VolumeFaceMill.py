@@ -561,6 +561,115 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         return [float(cut_depth_z), float(cut_depth_z) + probe_epsilon]
 
+    def _layer_section_depth_candidates(self, layer_shape, cut_depth_z, tolerance=1e-6):
+        """Return reliable interior section-depth candidates for one allowance layer.
+
+        The allowance executor wants the tool to cut at ``cut_depth_z``.
+        However, Path.Area can fail to produce usable sections when the requested
+        section height is close to a slab boundary.  For per-layer allowance
+        volumes the XY section is intentionally constant through the slab, so it
+        is safer to section inside the slab and later normalize the generated
+        path commands back to ``cut_depth_z``.
+        """
+
+        cut_depth_z = float(cut_depth_z)
+
+        try:
+            bb = layer_shape.BoundBox
+            z_min = float(bb.ZMin)
+            z_max = float(bb.ZMax)
+        except Exception:
+            return self._depth_candidates(cut_depth_z)
+
+        if z_max <= z_min + tolerance:
+            return self._depth_candidates(cut_depth_z)
+
+        thickness = z_max - z_min
+        center_z = 0.5 * (z_min + z_max)
+
+        # Use several increasingly conservative interior probes.  The cut depth
+        # is still tried first for compatibility, but the center of the slab is
+        # the most reliable candidate for Path.Area sectioning.
+        raw_candidates = [
+            cut_depth_z,
+            cut_depth_z + 1e-6,
+            cut_depth_z + min(0.01, max(0.0, thickness * 0.25)),
+            center_z,
+            z_min + max(tolerance * 10.0, thickness * 0.25),
+            z_max - max(tolerance * 10.0, thickness * 0.25),
+        ]
+
+        candidates = []
+        seen = set()
+
+        for value in raw_candidates:
+            value = float(value)
+
+            # Keep only section depths inside or very near the layer.  Interior
+            # depths are preferred; boundary depths are allowed as fallbacks.
+            if value < (z_min - tolerance) or value > (z_max + tolerance):
+                continue
+
+            rounded = round(value, 9)
+            if rounded in seen:
+                continue
+
+            seen.add(rounded)
+            candidates.append(value)
+
+        if not candidates:
+            candidates = self._depth_candidates(cut_depth_z)
+
+        return candidates
+
+    def _has_lateral_cutting_motion(self, commands):
+        """Return True when a command sequence contains real XY cutting motion."""
+
+        for cmd in commands:
+            if cmd.Name not in ("G1", "G2", "G3"):
+                continue
+
+            params = cmd.Parameters
+
+            # G2/G3 with arc parameters may omit one coordinate due to modal
+            # output, but they still represent lateral cutting.
+            if "X" in params or "Y" in params or "I" in params or "J" in params or "R" in params:
+                return True
+
+        return False
+
+    def _commands_for_cut_depth(self, commands, cut_depth_z):
+        """Return command copies with feed moves forced to ``cut_depth_z``.
+
+        Path.Area may be sectioned at an interior slab depth for reliability,
+        but the machine must still cut at the intended operation depth.
+
+        This normalizes all feed moves.  Clearance and safe-height rapids are
+        left alone, except that a rapid whose Z has already been set to the
+        interior section depth will be followed by normalized feed moves at the
+        correct cutting depth.
+        """
+
+        cut_depth_z = float(cut_depth_z)
+        normalized = []
+
+        for cmd in commands:
+            params = dict(cmd.Parameters)
+
+            if cmd.Name in ("G1", "G2", "G3"):
+                params["Z"] = cut_depth_z
+
+            new_cmd = Path.Command(cmd.Name, params)
+
+            try:
+                new_cmd.Annotations = dict(cmd.Annotations)
+            except Exception:
+                pass
+
+            normalized.append(new_cmd)
+
+        return normalized
+
     def _build_allowance_layer_paths(self, obj, getsim=False):
         """Generate feature-allowance paths one cutting layer at a time.
 
@@ -600,13 +709,19 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         try:
             for cut_depth_z, layer_shape in layer_volumes:
+                section_depth_candidates = self._layer_section_depth_candidates(
+                    layer_shape,
+                    cut_depth_z,
+                )
+
                 _resolved_depth, pp, sim, z_levels = self._build_path_for_depth_candidates(
                     obj,
                     layer_shape,
                     False,
                     start,
                     getsim,
-                    self._depth_candidates(cut_depth_z),
+                    section_depth_candidates,
+                    output_cut_depth=cut_depth_z,
                 )
 
                 if not z_levels:
@@ -614,20 +729,23 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                         bb = layer_shape.BoundBox
                         Path.Log.warning(
                             "Skipping allowance layer at "
-                            f"Z {cut_depth_z:.6f}; Path.Area did not produce cutting moves. "
-                            f"Layer bound box: "
+                            f"cut Z {cut_depth_z:.6f}; "
+                            "Path.Area did not produce usable lateral cutting moves. "
+                            "Layer bound box: "
                             f"({bb.XMin:.6f}, {bb.YMin:.6f}, {bb.ZMin:.6f}) -> "
                             f"({bb.XMax:.6f}, {bb.YMax:.6f}, {bb.ZMax:.6f})"
                         )
                     except Exception:
                         Path.Log.warning(
-                            f"Skipping allowance layer at Z {cut_depth_z:.6f}; "
-                            "Path.Area did not produce cutting moves."
+                            f"Skipping allowance layer at cut Z {cut_depth_z:.6f}; "
+                            "Path.Area did not produce usable lateral cutting moves."
                         )
+
                     continue
 
                 self._append_path_area_result(obj, pp, sim, sims)
                 generated_layers += 1
+
         finally:
             self.depthparams = saved_depthparams
 
@@ -688,13 +806,24 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         return None
 
-    def _cutting_z_levels_from_commands(self, commands):
-        """Return sorted unique cutting Z levels from a command sequence."""
+    def _cutting_z_levels_from_commands(self, commands, default_cut_depth=None):
+        """Return sorted unique cutting Z levels from a command sequence.
+
+        ``Path.fromShapes`` may emit modal XY feed moves without an explicit Z
+        word on every cutting command.  For allowance layers, callers may provide
+        ``default_cut_depth`` so valid modal output is not rejected just because
+        the command list does not spell out Z exactly as expected.
+        """
 
         z_levels = set()
         x = y = z = None
+
+        if default_cut_depth is not None:
+            default_cut_depth = float(default_cut_depth)
+
         for cmd in commands:
             params = cmd.Parameters
+
             if "X" in params:
                 x = float(params["X"])
             if "Y" in params:
@@ -702,8 +831,24 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             if "Z" in params:
                 z = float(params["Z"])
 
-            if cmd.Name in ("G1", "G2", "G3") and x is not None and y is not None and z is not None:
-                z_levels.add(round(z, 6))
+            if cmd.Name not in ("G1", "G2", "G3"):
+                continue
+
+            has_lateral_motion = (
+                "X" in params or "Y" in params or "I" in params or "J" in params or "R" in params
+            )
+
+            if not has_lateral_motion:
+                continue
+
+            effective_z = z
+            if effective_z is None:
+                effective_z = default_cut_depth
+
+            if effective_z is None:
+                continue
+
+            z_levels.add(round(float(effective_z), 6))
 
         return sorted(z_levels)
 
@@ -715,32 +860,58 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         start,
         getsim,
         candidate_depths,
+        output_cut_depth=None,
     ):
-        """Return the first candidate depth that yields real cutting moves."""
+        """Return the first candidate depth that yields real cutting moves.
+
+        ``candidate_depths`` are section depths for Path.Area.
+
+        ``output_cut_depth`` is the actual machining depth.  When provided, the
+        generated feed commands are normalized to this depth.  This is required
+        for Feature Allowance layers because a robust interior section height may
+        differ from the intended cut depth.
+        """
 
         saved_depthparams = self.depthparams
+
         try:
             seen = set()
+
             for candidate_depth in candidate_depths:
                 candidate_depth = float(candidate_depth)
                 rounded = round(candidate_depth, 9)
+
                 if rounded in seen:
                     continue
+
                 seen.add(rounded)
 
                 saved_end_vector = self.endVector
                 self.depthparams = [candidate_depth]
+
                 try:
                     pp, sim = self._buildPathArea(obj, shape, is_hole, start, getsim)
-                    z_levels = self._cutting_z_levels_from_commands(pp.Commands)
                 except Exception:
                     self.endVector = saved_end_vector
                     raise
 
-                if z_levels:
+                commands = pp.Commands
+
+                if output_cut_depth is not None:
+                    commands = self._commands_for_cut_depth(commands, output_cut_depth)
+                    pp = Path.Path(commands)
+                    z_levels = self._cutting_z_levels_from_commands(
+                        commands,
+                        default_cut_depth=output_cut_depth,
+                    )
+                else:
+                    z_levels = self._cutting_z_levels_from_commands(commands)
+
+                if z_levels and self._has_lateral_cutting_motion(commands):
                     return candidate_depth, pp, sim, z_levels
 
                 self.endVector = saved_end_vector
+
         finally:
             self.depthparams = saved_depthparams
 

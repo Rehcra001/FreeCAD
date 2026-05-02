@@ -155,16 +155,16 @@
        </widget>
       </item>
       <item row="1" column="0">
-       <widget class="QLabel" name="clearingPattern_label">
+       <widget class="QLabel" name="cuttingStrategy_label">
         <property name="text">
-         <string>Clearing pattern</string>
+         <string>Cutting strategy</string>
         </property>
        </widget>
       </item>
       <item row="1" column="1">
-       <widget class="QComboBox" name="clearingPattern">
+       <widget class="QComboBox" name="cuttingStrategy">
         <property name="toolTip">
-         <string>Pattern used to clear the safe removal volume.</string>
+         <string>Volume Face Mill strategy used to generate strict face-milling toolpaths. Strategies other than Strict Raster are implemented in later phases.</string>
         </property>
        </widget>
       </item>

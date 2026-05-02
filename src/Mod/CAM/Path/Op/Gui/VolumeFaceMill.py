@@ -12,7 +12,7 @@ import Path.Op.VolumeFaceMill as PathVolumeFaceMill
 from PySide.QtCore import QT_TRANSLATE_NOOP
 
 __title__ = "CAM Volume Face Mill Operation UI"
-__author__ = "OpenAI Codex"
+__author__ = "FreeCAD contributors"
 __url__ = "https://www.freecad.org"
 __doc__ = "Volume Face Mill operation page controller and command implementation."
 
@@ -21,6 +21,8 @@ if False:
     Path.Log.trackModule(Path.Log.thisModule())
 else:
     Path.Log.setLevel(Path.Log.Level.INFO, Path.Log.thisModule())
+
+_ANGLE_ENABLED_STRATEGIES = {"StrictRaster"}
 
 
 class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
@@ -77,7 +79,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         form = FreeCADGui.PySideUic.loadUi(":/panels/PageOpVolumeFaceMillEdit.ui")
         combo_to_property_map = [
             ("cutMode", "CutMode"),
-            ("clearingPattern", "ClearingPattern"),
+            ("cuttingStrategy", "CuttingStrategy"),
             ("optimizationMode", "OptimizationMode"),
             ("featureAllowanceMode", "FeatureAllowanceMode"),
             ("stockAllowanceMode", "StockAllowanceMode"),
@@ -96,9 +98,9 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         return PathPocketBaseGui.FeatureFacing
 
     def _update_angle(self, obj, set_model=True):
-        """Keep the angle field aligned with the active clearing pattern."""
+        """Keep the angle field aligned with the active cutting strategy."""
 
-        self.form.angle.setEnabled(obj.ClearingPattern != "Offset")
+        self.form.angle.setEnabled(obj.CuttingStrategy in _ANGLE_ENABLED_STRATEGIES)
         if set_model:
             PathGuiUtil.updateInputField(obj, "Angle", self.form.angle)
 
@@ -169,8 +171,8 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             if obj.CutMode != str(self.form.cutMode.currentData()):
                 obj.CutMode = str(self.form.cutMode.currentData())
 
-            if obj.ClearingPattern != str(self.form.clearingPattern.currentData()):
-                obj.ClearingPattern = str(self.form.clearingPattern.currentData())
+            if obj.CuttingStrategy != str(self.form.cuttingStrategy.currentData()):
+                obj.CuttingStrategy = str(self.form.cuttingStrategy.currentData())
 
             if obj.OptimizationMode != str(self.form.optimizationMode.currentData()):
                 obj.OptimizationMode = str(self.form.optimizationMode.currentData())
@@ -201,7 +203,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         self.setupCoolant(obj, self.form.coolantController)
 
         self.selectInComboBox(obj.CutMode, self.form.cutMode)
-        self.selectInComboBox(obj.ClearingPattern, self.form.clearingPattern)
+        self.selectInComboBox(obj.CuttingStrategy, self.form.cuttingStrategy)
         self.selectInComboBox(obj.OptimizationMode, self.form.optimizationMode)
 
         self.form.stepOverPercent.setValue(obj.StepOver)
@@ -228,7 +230,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         signals.append(self.form.toolController.currentIndexChanged)
         signals.append(self.form.coolantController.currentIndexChanged)
         signals.append(self.form.cutMode.currentIndexChanged)
-        signals.append(self.form.clearingPattern.currentIndexChanged)
+        signals.append(self.form.cuttingStrategy.currentIndexChanged)
         signals.append(self.form.optimizationMode.currentIndexChanged)
         signals.append(self.form.stepOverPercent.editingFinished)
         signals.append(self.form.extraOffset.editingFinished)
@@ -255,8 +257,8 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         if prop in {
             "Angle",
             "ClearEdges",
-            "ClearingPattern",
             "CutMode",
+            "CuttingStrategy",
             "ExtraOffset",
             "FeatureAllowanceMode",
             "FeatureAllowanceXY",

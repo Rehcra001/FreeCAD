@@ -3,6 +3,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import types
 import xml.etree.ElementTree as ET
 from unittest import mock
@@ -65,6 +66,25 @@ class _FakeQuantitySpinBox:
         self.widget.value = float(value)
 
 
+class _FakePropertyObject:
+    """Minimal property container for migration-helper tests."""
+
+    def __init__(self, clearing_pattern=None):
+        self._editor_modes = {}
+        if clearing_pattern is not None:
+            self.ClearingPattern = clearing_pattern
+
+    def addProperty(self, _prop_type, name, _group, _description):
+        setattr(self, name, None)
+        return self
+
+    def setEditorMode(self, name, mode):
+        self._editor_modes[name] = mode
+
+    def getEditorMode(self, name):
+        return self._editor_modes.get(name)
+
+
 class TestPathVolumeFaceMill(PathTestBase):
     """Test stock-aware Volume Face Mill operation."""
 
@@ -72,7 +92,17 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.doc = FreeCAD.newDocument("TestPathVolumeFaceMill")
 
     def tearDown(self):
-        FreeCAD.closeDocument(self.doc.Name)
+        doc = getattr(self, "doc", None)
+        if doc is None:
+            return
+
+        try:
+            doc_name = doc.Name
+        except ReferenceError:
+            return
+
+        if doc_name in FreeCAD.listDocuments():
+            FreeCAD.closeDocument(doc_name)
 
     def _make_stock(self, job, size=None, base=None):
         """Create stock block test shape."""
@@ -815,6 +845,22 @@ class TestPathVolumeFaceMill(PathTestBase):
             ["Linked", "Independent"],
         )
 
+    def test_cutting_strategy_property_defaults_to_strict_raster(self):
+        _job, _model, op = self._create_operation(name="cutting_strategy_defaults")
+
+        self.assertTrue(hasattr(op, "CuttingStrategy"))
+        self.assertEqual(op.CuttingStrategy, "StrictRaster")
+        self.assertEqual(
+            list(op.getEnumerationsOfProperty("CuttingStrategy")),
+            ["StrictRaster", "SquareSpiral", "RoundSpiral", "OffsetLoops", "Auto"],
+        )
+
+    def test_cutting_strategy_setup_properties_replace_clearing_pattern(self):
+        setup_properties = PathVolumeFaceMill.SetupProperties()
+
+        self.assertIn("CuttingStrategy", setup_properties)
+        self.assertNotIn("ClearingPattern", setup_properties)
+
     def test_allowance_setup_properties_use_xy_z_contract(self):
         setup_properties = PathVolumeFaceMill.SetupProperties()
 
@@ -898,6 +944,137 @@ class TestPathVolumeFaceMill(PathTestBase):
                 self.assertIn("Hidden", editor_mode)
             else:
                 self.assertIn(editor_mode, (2, "Hidden"))
+
+    def test_cutting_strategy_restore_maps_legacy_clearing_pattern_when_property_missing(self):
+        proxy = PathVolumeFaceMill.ObjectVolumeFaceMill.__new__(
+            PathVolumeFaceMill.ObjectVolumeFaceMill
+        )
+        proxy._initialize_runtime_state()
+
+        for clearing_pattern, expected_strategy in (
+            ("Offset", "OffsetLoops"),
+            ("ZigZag", "StrictRaster"),
+        ):
+            obj = _FakePropertyObject(clearing_pattern=clearing_pattern)
+            added_properties = proxy._add_properties(obj)
+
+            for name, values in proxy.propertyEnumerations():
+                if hasattr(obj, name):
+                    setattr(obj, name, values)
+
+            proxy._initialize_cutting_strategy_property(obj, added_properties)
+            self.assertEqual(obj.CuttingStrategy, expected_strategy)
+
+    def test_strict_raster_ignores_hidden_compatibility_clearing_pattern(self):
+        for clearing_pattern in ("ZigZag", "Line", "Grid", "Offset", "ZigZagOffset"):
+            _job, _model, op = self._create_operation(
+                name=f"strict_raster_{clearing_pattern}",
+                clearing_pattern=clearing_pattern,
+                override_heights=False,
+            )
+            op.CuttingStrategy = "StrictRaster"
+            op.Proxy.radius = self._tool_radius(op)
+            self.assertEqual(op.ClearingPattern, clearing_pattern)
+            self.assertEqual(
+                op.Proxy._compatibility_clearing_pattern_for_strategy(op),
+                "ZigZag",
+            )
+
+            execution_obj = op.Proxy._execution_view(op)
+            self.assertEqual(execution_obj.ClearingPattern, "ZigZag")
+            self.assertEqual(op.Proxy.areaOpAreaParams(op, False)["PocketMode"], 1)
+            self.assertEqual(op.Proxy.areaOpAreaParams(execution_obj, False)["PocketMode"], 1)
+
+    def test_unimplemented_cutting_strategy_aborts_safely(self):
+        _job, _model, op = self._create_operation(name="unimplemented_strategy")
+        op.CuttingStrategy = "SquareSpiral"
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        self.assertEqual(len(self._cutting_moves(op.Path)), 0)
+        self.assertTrue(op.removalshape.isNull())
+
+    def test_cutting_strategy_live_change_reports_unsupported_strategy_once(self):
+        _job, _model, op = self._create_operation(name="cutting_strategy_live_change_error")
+        error_messages = []
+
+        def capture_error(message):
+            error_messages.append(str(message))
+            return None
+
+        with mock.patch.object(Path.Log, "error", side_effect=capture_error):
+            op.CuttingStrategy = "SquareSpiral"
+
+        self.assertEqual(op.CuttingStrategy, "SquareSpiral")
+        strategy_errors = [
+            message
+            for message in error_messages
+            if "Selected Volume Face Mill cutting strategy is not implemented yet." in message
+        ]
+        self.assertEqual(len(strategy_errors), 1)
+
+    def test_cutting_strategy_round_trip_preserves_persisted_value(self):
+        _job, _model, op = self._create_operation(name="cutting_strategy_round_trip")
+        op.CuttingStrategy = "Auto"
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".FCStd")
+        temp_file.close()
+        reopened = None
+        original_doc_name = self.doc.Name
+
+        try:
+            self.doc.saveAs(temp_file.name)
+            reopened = FreeCAD.openDocument(temp_file.name)
+
+            restored = reopened.getObject(op.Name)
+            self.assertIsNotNone(restored)
+            self.assertTrue(hasattr(restored, "CuttingStrategy"))
+            self.assertEqual(restored.CuttingStrategy, "Auto")
+        finally:
+            if reopened is not None:
+                FreeCAD.closeDocument(reopened.Name)
+            if original_doc_name in FreeCAD.listDocuments():
+                self.doc = FreeCAD.getDocument(original_doc_name)
+            else:
+                self.doc = FreeCAD.newDocument("TestPathVolumeFaceMill")
+            os.unlink(temp_file.name)
+
+    def test_cutting_strategy_restore_does_not_repeat_validation_errors(self):
+        _job, _model, op = self._create_operation(name="cutting_strategy_restore_errors")
+        op.CuttingStrategy = "Auto"
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".FCStd")
+        temp_file.close()
+        reopened = None
+        error_messages = []
+        original_doc_name = self.doc.Name
+
+        def capture_error(message):
+            error_messages.append(str(message))
+            return None
+
+        try:
+            self.doc.saveAs(temp_file.name)
+            with mock.patch.object(Path.Log, "error", side_effect=capture_error):
+                reopened = FreeCAD.openDocument(temp_file.name)
+
+            restored = reopened.getObject(op.Name)
+            self.assertIsNotNone(restored)
+            self.assertEqual(restored.CuttingStrategy, "Auto")
+
+            strategy_errors = [
+                message
+                for message in error_messages
+                if "Selected Volume Face Mill cutting strategy is not implemented yet." in message
+            ]
+            self.assertEqual(len(strategy_errors), 0)
+        finally:
+            if reopened is not None:
+                FreeCAD.closeDocument(reopened.Name)
+            if original_doc_name in FreeCAD.listDocuments():
+                self.doc = FreeCAD.getDocument(original_doc_name)
+            else:
+                self.doc = FreeCAD.newDocument("TestPathVolumeFaceMill")
+            os.unlink(temp_file.name)
 
     def test_restore_recovers_missing_runtime_sync_flags(self):
         _job, _model, op = self._create_operation(
@@ -1071,6 +1248,8 @@ class TestPathVolumeFaceMill(PathTestBase):
         }
 
         for widget_name in (
+            "cuttingStrategy",
+            "cuttingStrategy_label",
             "featureAllowanceMode",
             "featureAllowanceLinkedFrame",
             "featureAllowanceLinked",
@@ -1110,6 +1289,8 @@ class TestPathVolumeFaceMill(PathTestBase):
             "Operation placement or workplane rotation does not rotate these allowance directions.",
             tooltips["featureAllowanceMode"],
         )
+        self.assertIn("strict face-milling toolpaths", tooltips["cuttingStrategy"])
+        self.assertIn("implemented in later phases", tooltips["cuttingStrategy"])
         self.assertIn("job/world XY plane", tooltips["featureAllowanceXY"])
         self.assertIn("job/world +Z axis", tooltips["featureAllowanceZ"])
         self.assertIn("job/world axes", tooltips["stockAllowanceMode"])
@@ -1129,6 +1310,28 @@ class TestPathVolumeFaceMill(PathTestBase):
             tooltips["protectSelectedFeatures"],
         )
         self.assertIn("Target detection uses Job/world Z.", tooltips["protectSelectedFeatures"])
+
+    def test_volume_face_mill_ui_uses_cutting_strategy_not_clearing_pattern(self):
+        ui_path = self._volume_face_mill_ui_path()
+        tree = ET.parse(ui_path)
+        root = tree.getroot()
+
+        widget_names = {
+            widget.attrib.get("name") for widget in root.iter("widget") if widget.attrib.get("name")
+        }
+
+        self.assertIn("cuttingStrategy", widget_names)
+        self.assertIn("cuttingStrategy_label", widget_names)
+        self.assertNotIn("clearingPattern", widget_names)
+        self.assertNotIn("clearingPattern_label", widget_names)
+
+    def test_volume_face_mill_gui_binds_cutting_strategy_not_clearing_pattern(self):
+        gui_path = self._volume_face_mill_gui_path()
+        with open(gui_path, encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn('("cuttingStrategy", "CuttingStrategy")', source)
+        self.assertNotIn('("clearingPattern", "ClearingPattern")', source)
 
     def test_allowance_gui_controller_linked_mode_writes_xy_and_z_and_hides_independent_fields(
         self,
@@ -2144,7 +2347,7 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertAlmostEqual(op.FinalDepth.Value, 45.0, places=6)
         self._assert_has_z_level(self._cutting_z_levels(self._cutting_moves(op.Path)), 45.0)
 
-    def test_selected_target_face_with_same_base_drafted_keepouts_reaches_depth_with_offset_pattern(
+    def test_selected_target_face_with_same_base_drafted_keepouts_reaches_depth_with_compatibility_pattern(
         self,
     ):
         model = self._make_drafted_model()
@@ -2340,6 +2543,12 @@ class TestPathVolumeFaceMill(PathTestBase):
         if hasattr(op, "ProtectModel"):
             self.assertTrue(op.ProtectModel)
             editor_mode = op.getEditorMode("ProtectModel")
+            if isinstance(editor_mode, list):
+                self.assertIn("Hidden", editor_mode)
+            else:
+                self.assertIn(editor_mode, (2, "Hidden"))
+        if hasattr(op, "ClearingPattern"):
+            editor_mode = op.getEditorMode("ClearingPattern")
             if isinstance(editor_mode, list):
                 self.assertIn("Hidden", editor_mode)
             else:

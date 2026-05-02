@@ -15,7 +15,7 @@ from lazy_loader.lazy_loader import LazyLoader
 Part = LazyLoader("Part", globals(), "Part")
 
 __title__ = "CAM Volume Face Mill Operation"
-__author__ = "OpenAI Codex"
+__author__ = "FreeCAD contributors"
 __url__ = "https://www.freecad.org"
 __doc__ = (
     "Class and implementation of stock-aware Volume Face Mill operation. "
@@ -47,10 +47,74 @@ _ALLOWANCE_DISTANCE_PROPERTIES = (
     "StockAllowanceXY",
     "StockAllowanceZ",
 )
+_CUTTING_STRATEGY_DEFAULT = "StrictRaster"
+_CUTTING_STRATEGY_SUPPORTED_IN_PHASE_1 = {"StrictRaster"}
+_CUTTING_STRATEGY_FROM_CLEARING_PATTERN = {
+    "ZigZag": "StrictRaster",
+    "Line": "StrictRaster",
+    "Grid": "StrictRaster",
+    "Offset": "OffsetLoops",
+    "ZigZagOffset": "SquareSpiral",
+}
+_CUTTING_STRATEGY_PHASE_1_COMPATIBILITY_CLEARING_PATTERN = {
+    "StrictRaster": "ZigZag",
+}
+_CUTTING_STRATEGY_PHASE_1_POCKET_MODE = {
+    "StrictRaster": 1,
+}
 _LEGACY_ALLOWANCE_XY_PROPERTIES = {
     "FeatureAllowanceXY": ("FeatureAllowanceX", "FeatureAllowanceY"),
     "StockAllowanceXY": ("StockAllowanceX", "StockAllowanceY"),
 }
+
+
+def _unsupported_cutting_strategy_message():
+    """Return the Phase 1 unsupported cutting-strategy error message."""
+
+    return translate(
+        "CAM_VolumeFaceMill",
+        "Selected Volume Face Mill cutting strategy is not implemented yet.",
+    )
+
+
+class _CompatibilityPropertyView:
+    """Proxy document-object access while overriding transient compatibility values."""
+
+    __slots__ = ("_obj", "_overrides")
+
+    def __init__(self, obj, overrides):
+        object.__setattr__(self, "_obj", obj)
+        object.__setattr__(self, "_overrides", dict(overrides))
+
+    def __getattr__(self, name):
+        overrides = object.__getattribute__(self, "_overrides")
+        if name in overrides:
+            return overrides[name]
+        return getattr(object.__getattribute__(self, "_obj"), name)
+
+    def __setattr__(self, name, value):
+        if name in self.__slots__:
+            object.__setattr__(self, name, value)
+            return
+
+        overrides = object.__getattribute__(self, "_overrides")
+        if name in overrides:
+            overrides[name] = value
+            return
+
+        setattr(object.__getattribute__(self, "_obj"), name, value)
+
+    def __delattr__(self, name):
+        if name in self.__slots__:
+            object.__delattr__(self, name)
+            return
+
+        overrides = object.__getattribute__(self, "_overrides")
+        if name in overrides:
+            del overrides[name]
+            return
+
+        delattr(object.__getattribute__(self, "_obj"), name)
 
 
 class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
@@ -64,6 +128,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         """Initialize transient proxy state that is not persisted in documents."""
 
         self._forcing_compatibility_properties = False
+        self._backfilling_property_contract = False
         self._pending_standard_abort = None
         self._syncing_allowances = False
         self._syncing_depths = False
@@ -73,6 +138,8 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         if not hasattr(self, "_forcing_compatibility_properties"):
             self._forcing_compatibility_properties = False
+        if not hasattr(self, "_backfilling_property_contract"):
+            self._backfilling_property_contract = False
         if not hasattr(self, "_pending_standard_abort"):
             self._pending_standard_abort = None
         if not hasattr(self, "_syncing_allowances"):
@@ -91,6 +158,13 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             "OptimizationMode": [
                 (translate("CAM_VolumeFaceMill", "None"), "None"),
                 (translate("CAM_VolumeFaceMill", "Min Travel"), "MinTravel"),
+            ],
+            "CuttingStrategy": [
+                (translate("CAM_VolumeFaceMill", "Strict Raster"), "StrictRaster"),
+                (translate("CAM_VolumeFaceMill", "Square Spiral"), "SquareSpiral"),
+                (translate("CAM_VolumeFaceMill", "Round Spiral"), "RoundSpiral"),
+                (translate("CAM_VolumeFaceMill", "Offset Loops"), "OffsetLoops"),
+                (translate("CAM_VolumeFaceMill", "Auto"), "Auto"),
             ],
             "FeatureAllowanceMode": [
                 (translate("CAM_VolumeFaceMill", "Linked"), "Linked"),
@@ -174,6 +248,18 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 ),
             )
             added_properties.add("OptimizationMode")
+
+        if not hasattr(obj, "CuttingStrategy"):
+            obj.addProperty(
+                "App::PropertyEnumeration",
+                "CuttingStrategy",
+                "Path",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Volume Face Mill cutting strategy.",
+                ),
+            )
+            added_properties.add("CuttingStrategy")
 
         if not hasattr(obj, "FeatureAllowanceMode"):
             obj.addProperty(
@@ -398,6 +484,9 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 obj.ProtectModel = True
                 obj.setEditorMode("ProtectModel", 2)
 
+            if hasattr(obj, "ClearingPattern"):
+                obj.setEditorMode("ClearingPattern", 2)
+
             for legacy_prop_names in _LEGACY_ALLOWANCE_XY_PROPERTIES.values():
                 for legacy_prop_name in legacy_prop_names:
                     if hasattr(obj, legacy_prop_name):
@@ -405,11 +494,64 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         finally:
             self._forcing_compatibility_properties = False
 
+    def _initialize_cutting_strategy_property(self, obj, added_properties):
+        """Initialize or backfill the Volume Face Mill cutting strategy."""
+
+        if not hasattr(obj, "CuttingStrategy"):
+            return
+
+        valid_values = [
+            value for _label, value in self.propertyEnumerations(dataType="raw")["CuttingStrategy"]
+        ]
+        current_value = getattr(obj, "CuttingStrategy", None)
+
+        if current_value in valid_values and "CuttingStrategy" not in added_properties:
+            return
+
+        mapped_value = None
+        if hasattr(obj, "ClearingPattern"):
+            mapped_value = _CUTTING_STRATEGY_FROM_CLEARING_PATTERN.get(str(obj.ClearingPattern))
+
+        if mapped_value in valid_values:
+            obj.CuttingStrategy = mapped_value
+        else:
+            obj.CuttingStrategy = _CUTTING_STRATEGY_DEFAULT
+
+    def _compatibility_clearing_pattern_for_strategy(self, obj):
+        """Return the transient compatibility clearing pattern for execution."""
+
+        if not hasattr(obj, "CuttingStrategy"):
+            return None
+
+        return _CUTTING_STRATEGY_PHASE_1_COMPATIBILITY_CLEARING_PATTERN.get(obj.CuttingStrategy)
+
+    def _execution_view(self, obj):
+        """Return an execution-time view with canonical compatibility values."""
+
+        compatibility_pattern = self._compatibility_clearing_pattern_for_strategy(obj)
+        if compatibility_pattern is None:
+            return obj
+
+        return _CompatibilityPropertyView(
+            obj,
+            {"ClearingPattern": compatibility_pattern},
+        )
+
+    def _validate_phase_1_cutting_strategy(self, obj):
+        """Return True if the selected strategy is allowed in the current implementation phase."""
+
+        if not hasattr(obj, "CuttingStrategy"):
+            return True
+
+        return obj.CuttingStrategy in _CUTTING_STRATEGY_SUPPORTED_IN_PHASE_1
+
     def _backfill_allowance_property_contract(self, obj):
         """Apply allowance property creation and migration without edit-time sync."""
 
         self._ensure_runtime_state()
+        previous_backfill_state = self._backfilling_property_contract
         previous_sync_state = self._syncing_allowances
+        self._backfilling_property_contract = True
         self._syncing_allowances = True
         try:
             added_properties = self._add_properties(obj)
@@ -422,6 +564,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 if hasattr(obj, name):
                     setattr(obj, name, values)
 
+            self._initialize_cutting_strategy_property(obj, added_properties)
             migrated_properties = self._migrate_allowance_compatibility_properties(
                 obj, added_properties
             )
@@ -437,6 +580,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
                 VolumeFaceMillUtils.set_distance_property(obj, z_prop, preserved_z_value)
         finally:
+            self._backfilling_property_contract = previous_backfill_state
             self._syncing_allowances = previous_sync_state
 
         self._force_compatibility_properties(obj)
@@ -945,11 +1089,20 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 error=True,
             )
 
-        if VolumeFaceMillUtils.feature_allowance_is_active(obj):
-            return self._build_allowance_layer_paths(obj, getsim)
+        if not self._validate_phase_1_cutting_strategy(obj):
+            return self._abort_no_path(
+                obj,
+                _unsupported_cutting_strategy_message(),
+                error=True,
+            )
+
+        execution_obj = self._execution_view(obj)
+
+        if VolumeFaceMillUtils.feature_allowance_is_active(execution_obj):
+            return self._build_allowance_layer_paths(execution_obj, getsim)
 
         self._pending_standard_abort = None
-        result = PathAreaOp.ObjectOp.opExecute(self, obj, getsim)
+        result = PathAreaOp.ObjectOp.opExecute(self, execution_obj, getsim)
         if self._pending_standard_abort is not None:
             message, error, preserve_removalshape = self._pending_standard_abort
             self._pending_standard_abort = None
@@ -973,6 +1126,7 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         obj.ProtectSelectedFeatures = False
         obj.ClearEdges = False
         obj.OptimizationMode = "None"
+        obj.CuttingStrategy = _CUTTING_STRATEGY_DEFAULT
         obj.FeatureAllowanceMode = _ALLOWANCE_MODE_DEFAULT
         obj.StockAllowanceMode = _ALLOWANCE_MODE_DEFAULT
 
@@ -983,6 +1137,9 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         obj.StepOver = 50
         obj.Angle = 45
+        # ClearingPattern is inherited from ObjectPocket but is not user-facing for
+        # Volume Face Mill. It remains populated only for compatibility with the
+        # temporary Path.Area baseline.
         obj.ClearingPattern = "ZigZag"
         obj.MinTravel = False
 
@@ -1004,6 +1161,14 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         if prop == "OptimizationMode":
             obj.MinTravel = obj.OptimizationMode == "MinTravel"
+
+        if prop == "CuttingStrategy":
+            if (
+                not self._validate_phase_1_cutting_strategy(obj)
+                and not self._backfilling_property_contract
+                and "Restore" not in getattr(obj, "State", ())
+            ):
+                Path.Log.error(_unsupported_cutting_strategy_message())
 
         if prop in {"BoundaryShape", "ProtectModel"}:
             self._force_compatibility_properties(obj)
@@ -1148,7 +1313,14 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
     def areaOpAreaParams(self, obj, isHole):
         """Return Path.Area parameters."""
 
-        return super().areaOpAreaParams(obj, isHole)
+        params = super().areaOpAreaParams(obj, isHole)
+
+        if hasattr(obj, "CuttingStrategy"):
+            pocket_mode = _CUTTING_STRATEGY_PHASE_1_POCKET_MODE.get(obj.CuttingStrategy)
+            if pocket_mode is not None:
+                params["PocketMode"] = pocket_mode
+
+        return params
 
     def areaOpPathParams(self, obj, isHole):
         """Return Path.fromShapes parameters."""
@@ -1180,15 +1352,27 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
 def SetupProperties():
     setup = PathPocketBase.SetupProperties()
-    setup.append("ProtectSelectedFeatures")
-    setup.append("ClearEdges")
-    setup.append("OptimizationMode")
-    setup.append("FeatureAllowanceMode")
-    setup.append("FeatureAllowanceXY")
-    setup.append("FeatureAllowanceZ")
-    setup.append("StockAllowanceMode")
-    setup.append("StockAllowanceXY")
-    setup.append("StockAllowanceZ")
+
+    if "ClearingPattern" in setup:
+        setup.remove("ClearingPattern")
+
+    if "CuttingStrategy" not in setup:
+        setup.append("CuttingStrategy")
+
+    for prop in (
+        "ProtectSelectedFeatures",
+        "ClearEdges",
+        "OptimizationMode",
+        "FeatureAllowanceMode",
+        "FeatureAllowanceXY",
+        "FeatureAllowanceZ",
+        "StockAllowanceMode",
+        "StockAllowanceXY",
+        "StockAllowanceZ",
+    ):
+        if prop not in setup:
+            setup.append(prop)
+
     return setup
 
 

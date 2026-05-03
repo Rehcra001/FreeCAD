@@ -82,6 +82,13 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             obj,
             "StockEdgeClearanceY",
         )
+        self.entryClearanceSpinBox = None
+        if hasattr(self.form, "entryClearance"):
+            self.entryClearanceSpinBox = PathGuiUtil.QuantitySpinBox(
+                self.form.entryClearance,
+                obj,
+                "EntryClearance",
+            )
         self._applying_form_fields = False
         self._edited_stock_edge_clearance_properties = set()
 
@@ -94,6 +101,7 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             ("cuttingStrategy", "CuttingStrategy"),
             ("optimizationMode", "OptimizationMode"),
             ("materialStateMode", "MaterialStateMode"),
+            ("entrySide", "EntrySide"),
             ("featureAllowanceMode", "FeatureAllowanceMode"),
             ("stockAllowanceMode", "StockAllowanceMode"),
         ]
@@ -150,6 +158,8 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         self.stockAllowanceZSpinBox.updateWidget()
         self.stockEdgeClearanceXSpinBox.updateWidget()
         self.stockEdgeClearanceYSpinBox.updateWidget()
+        if self.entryClearanceSpinBox is not None:
+            self.entryClearanceSpinBox.updateWidget()
 
     @staticmethod
     def _widget_quantity_value(widget):
@@ -287,6 +297,13 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             if obj.MaterialStateMode != str(self.form.materialStateMode.currentData()):
                 obj.MaterialStateMode = str(self.form.materialStateMode.currentData())
 
+            if hasattr(self.form, "entrySide"):
+                if obj.EntrySide != str(self.form.entrySide.currentData()):
+                    obj.EntrySide = str(self.form.entrySide.currentData())
+
+            if self.entryClearanceSpinBox is not None:
+                self.entryClearanceSpinBox.updateProperty()
+
             if obj.StepOver != self.form.stepOverPercent.value():
                 obj.StepOver = self.form.stepOverPercent.value()
 
@@ -318,6 +335,10 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         self.selectInComboBox(obj.CuttingStrategy, self.form.cuttingStrategy)
         self.selectInComboBox(obj.OptimizationMode, self.form.optimizationMode)
         self.selectInComboBox(obj.MaterialStateMode, self.form.materialStateMode)
+        if hasattr(self.form, "entrySide"):
+            self.selectInComboBox(obj.EntrySide, self.form.entrySide)
+        if self.entryClearanceSpinBox is not None:
+            self.entryClearanceSpinBox.updateWidget()
 
         self.form.stepOverPercent.setValue(obj.StepOver)
         self.form.extraOffset.setText(
@@ -347,6 +368,10 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
         signals.append(self.form.cuttingStrategy.currentIndexChanged)
         signals.append(self.form.optimizationMode.currentIndexChanged)
         signals.append(self.form.materialStateMode.currentIndexChanged)
+        if hasattr(self.form, "entrySide"):
+            signals.append(self.form.entrySide.currentIndexChanged)
+        if hasattr(self.form, "entryClearance"):
+            signals.append(self.form.entryClearance.editingFinished)
         signals.append(self.form.stepOverPercent.editingFinished)
         signals.append(self.form.extraOffset.editingFinished)
         signals.append(self.form.angle.editingFinished)
@@ -389,6 +414,8 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
             "FeatureAllowanceMode",
             "FeatureAllowanceXY",
             "FeatureAllowanceZ",
+            "EntryClearance",
+            "EntrySide",
             "MaterialStateMode",
             "OptimizationMode",
             "ProtectSelectedFeatures",

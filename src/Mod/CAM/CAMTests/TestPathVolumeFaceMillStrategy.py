@@ -5,6 +5,8 @@ import Part
 
 from CAMTests.PathTestUtils import PathTestBase
 import Path.Base.Generator.volume_face_mill_common as common
+import Path.Base.Generator.volume_face_mill_entry as entry
+import Path.Base.Generator.volume_face_mill_sections as sections
 import Path.Base.Generator.volume_face_mill_validation as validation
 
 
@@ -25,6 +27,30 @@ class TestPathVolumeFaceMillStrategy(PathTestBase):
     @staticmethod
     def _stock_boundbox():
         return Part.makeBox(100.0, 100.0, 10.0, FreeCAD.Vector(0, 0, 0)).BoundBox
+
+    @staticmethod
+    def _stock_shape():
+        return Part.makeBox(100.0, 100.0, 10.0, FreeCAD.Vector(0, 0, 0))
+
+    @staticmethod
+    def _make_rectangle_wire(xmin, xmax, ymin, ymax, z):
+        return Part.makePolygon(
+            [
+                FreeCAD.Vector(xmin, ymin, z),
+                FreeCAD.Vector(xmax, ymin, z),
+                FreeCAD.Vector(xmax, ymax, z),
+                FreeCAD.Vector(xmin, ymax, z),
+                FreeCAD.Vector(xmin, ymin, z),
+            ]
+        )
+
+    def _make_region(self, xmin, xmax, ymin, ymax, z, region_id=1, inner_wires=None):
+        return common.CutRegion(
+            z=float(z),
+            outer_wire=self._make_rectangle_wire(xmin, xmax, ymin, ymax, z),
+            inner_wires=list(inner_wires or []),
+            region_id=int(region_id),
+        )
 
     def test_motion_kind_constants_are_stable(self):
         self.assertEqual(common.MOTION_ENTRY_PLUNGE, "entry_plunge")
@@ -430,3 +456,113 @@ class TestPathVolumeFaceMillStrategy(PathTestBase):
         )
         self.assertGreater(len(errors), 0)
         self.assertEqual(result.validation_errors, errors)
+
+    def test_depth_values_from_depthparams_returns_descending_unique_values(self):
+        values = sections.depth_values_from_depthparams(
+            [5.0, 1.0, 5.0, 3.0, float("nan"), float("inf")],
+            start_depth=10.0,
+            final_depth=0.0,
+        )
+
+        self.assertEqual(values, [10.0, 5.0, 3.0, 1.0, 0.0])
+
+    def test_make_cut_regions_returns_region_for_simple_box_section(self):
+        removal = self._stock_shape()
+        regions = sections.make_cut_regions(removal, [5.0])
+
+        self.assertEqual(len(regions), 1)
+        self.assertIsNotNone(regions[0].outer_wire)
+        self.assertEqual(regions[0].z, 5.0)
+
+    def test_cut_region_preserves_inner_wire_for_box_with_island(self):
+        outer = Part.makeBox(100, 100, 10, FreeCAD.Vector(0, 0, 0))
+        island = Part.makeBox(20, 20, 10, FreeCAD.Vector(40, 40, 0))
+        removal = outer.cut(island)
+
+        section = sections.section_shape_at_z(removal, 5.0)
+        regions = sections.cut_regions_from_section(section, 5.0, source_shape=removal)
+
+        self.assertEqual(len(regions), 1)
+        self.assertIsNotNone(regions[0].outer_wire)
+        self.assertGreaterEqual(len(regions[0].inner_wires), 1)
+        self.assertEqual(regions[0].z, 5.0)
+
+    def test_entry_side_auto_resolves_to_minus_x(self):
+        self.assertEqual(entry.resolve_entry_side("Auto"), "-X")
+
+    def test_common_plunge_point_minus_x_is_outside_stock(self):
+        point = entry.common_plunge_point(self._stock_boundbox(), "-X", 10.0)
+        self.assertAlmostEqual(point.x, -10.0, places=6)
+        self.assertAlmostEqual(point.y, 50.0, places=6)
+        self.assertTrue(common.xy_outside_boundbox(point, self._stock_boundbox()))
+
+    def test_common_plunge_point_plus_x_is_outside_stock(self):
+        point = entry.common_plunge_point(self._stock_boundbox(), "+X", 10.0)
+        self.assertAlmostEqual(point.x, 110.0, places=6)
+        self.assertAlmostEqual(point.y, 50.0, places=6)
+        self.assertTrue(common.xy_outside_boundbox(point, self._stock_boundbox()))
+
+    def test_common_plunge_point_minus_y_is_outside_stock(self):
+        point = entry.common_plunge_point(self._stock_boundbox(), "-Y", 10.0)
+        self.assertAlmostEqual(point.x, 50.0, places=6)
+        self.assertAlmostEqual(point.y, -10.0, places=6)
+        self.assertTrue(common.xy_outside_boundbox(point, self._stock_boundbox()))
+
+    def test_common_plunge_point_plus_y_is_outside_stock(self):
+        point = entry.common_plunge_point(self._stock_boundbox(), "+Y", 10.0)
+        self.assertAlmostEqual(point.x, 50.0, places=6)
+        self.assertAlmostEqual(point.y, 110.0, places=6)
+        self.assertTrue(common.xy_outside_boundbox(point, self._stock_boundbox()))
+
+    def test_layer_entry_uses_common_plunge_point_at_layer_z(self):
+        plan = entry.make_entry_plan(self._stock_boundbox(), "-X", 10.0)
+        layer_entry = entry.make_layer_entry(plan, 5.0)
+
+        self.assertAlmostEqual(layer_entry.plunge_point.x, plan.common_plunge_point.x, places=6)
+        self.assertAlmostEqual(layer_entry.plunge_point.y, plan.common_plunge_point.y, places=6)
+        self.assertAlmostEqual(layer_entry.plunge_point.z, 5.0, places=6)
+
+    def test_lead_in_start_aligns_with_first_cut_start_for_x_entry(self):
+        plan = entry.make_entry_plan(self._stock_boundbox(), "-X", 10.0)
+        first_cut_start = FreeCAD.Vector(20.0, 30.0, 5.0)
+        lead_in_start = entry.lead_in_start_for_cut(plan, first_cut_start)
+
+        self.assertAlmostEqual(lead_in_start.x, plan.common_plunge_point.x, places=6)
+        self.assertAlmostEqual(lead_in_start.y, first_cut_start.y, places=6)
+        self.assertAlmostEqual(lead_in_start.z, first_cut_start.z, places=6)
+
+    def test_lead_in_start_aligns_with_first_cut_start_for_y_entry(self):
+        plan = entry.make_entry_plan(self._stock_boundbox(), "+Y", 10.0)
+        first_cut_start = FreeCAD.Vector(20.0, 30.0, 5.0)
+        lead_in_start = entry.lead_in_start_for_cut(plan, first_cut_start)
+
+        self.assertAlmostEqual(lead_in_start.x, first_cut_start.x, places=6)
+        self.assertAlmostEqual(lead_in_start.y, plan.common_plunge_point.y, places=6)
+        self.assertAlmostEqual(lead_in_start.z, first_cut_start.z, places=6)
+
+    def test_entry_plunge_motion_is_downward_entry_plunge(self):
+        plan = entry.make_entry_plan(self._stock_boundbox(), "-X", 10.0)
+        layer_entry = entry.make_layer_entry(plan, 5.0)
+        motion = entry.make_entry_plunge_motion(layer_entry, 15.0)
+
+        self.assertEqual(motion.kind, common.MOTION_ENTRY_PLUNGE)
+        self.assertFalse(motion.is_cutting)
+        self.assertFalse(motion.is_retracted)
+        self.assertEqual(motion.layer_z, 5.0)
+        self.assertTrue(common.motion_is_downward(motion))
+
+    def test_lead_in_motion_is_non_cutting(self):
+        plan = entry.make_entry_plan(self._stock_boundbox(), "-X", 10.0)
+        layer_entry = entry.make_layer_entry(
+            plan,
+            5.0,
+            first_cut_start=FreeCAD.Vector(20.0, 30.0, 5.0),
+        )
+        motion = entry.make_lead_in_motion(layer_entry)
+
+        self.assertIsNotNone(motion)
+        self.assertEqual(motion.kind, common.MOTION_LEAD_IN)
+        self.assertFalse(motion.is_cutting)
+        self.assertFalse(motion.is_retracted)
+        self.assertAlmostEqual(motion.z_start, 5.0, places=6)
+        self.assertAlmostEqual(motion.z_end, 5.0, places=6)

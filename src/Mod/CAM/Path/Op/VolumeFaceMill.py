@@ -55,6 +55,9 @@ _CUTTING_STRATEGY_DEFAULT = "StrictRaster"
 _CUTTING_STRATEGY_SUPPORTED_IN_PHASE_1 = {"StrictRaster"}
 _MATERIAL_STATE_MODE_DEFAULT = "FullStock"
 _MATERIAL_STATE_MODE_SUPPORTED_IN_PHASE_4 = {"FullStock"}
+_ENTRY_SIDE_DEFAULT = "Auto"
+_ENTRY_CLEARANCE_EXPRESSION = "OpToolDiameter + 10 mm"
+_ENTRY_SIDE_VALUES = ("Auto", "-X", "+X", "-Y", "+Y")
 _CUTTING_STRATEGY_FROM_CLEARING_PATTERN = {
     "ZigZag": "StrictRaster",
     "Line": "StrictRaster",
@@ -141,6 +144,13 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             "MaterialStateMode": [
                 (translate("CAM_VolumeFaceMill", "Full job stock"), "FullStock"),
                 (translate("CAM_VolumeFaceMill", "Remaining material"), "RemainingMaterial"),
+            ],
+            "EntrySide": [
+                (translate("CAM_VolumeFaceMill", "Auto"), "Auto"),
+                (translate("CAM_VolumeFaceMill", "-X"), "-X"),
+                (translate("CAM_VolumeFaceMill", "+X"), "+X"),
+                (translate("CAM_VolumeFaceMill", "-Y"), "-Y"),
+                (translate("CAM_VolumeFaceMill", "+Y"), "+Y"),
             ],
             "FeatureAllowanceMode": [
                 (translate("CAM_VolumeFaceMill", "Linked"), "Linked"),
@@ -272,6 +282,30 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 ),
             )
             added_properties.add("MaterialStateMode")
+
+        if not self._has_operation_property(obj, "EntrySide"):
+            obj.addProperty(
+                "App::PropertyEnumeration",
+                "EntrySide",
+                "Volume Face Mill",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Stock side used for the mandatory outside-stock entry.",
+                ),
+            )
+            added_properties.add("EntrySide")
+
+        if not self._has_operation_property(obj, "EntryClearance"):
+            obj.addProperty(
+                "App::PropertyDistance",
+                "EntryClearance",
+                "Volume Face Mill",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Minimum distance outside stock extents used for face-mill entry plunges.",
+                ),
+            )
+            added_properties.add("EntryClearance")
 
         if not hasattr(obj, "FeatureAllowanceMode"):
             obj.addProperty(
@@ -490,6 +524,42 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             self._default_stock_edge_clearance(),
         )
 
+    def _set_entry_clearance_default(self, obj):
+        """Set the default entry clearance expression or fallback numeric value."""
+
+        if not self._has_operation_property(obj, "EntryClearance"):
+            return
+
+        try:
+            obj.setExpression("EntryClearance", _ENTRY_CLEARANCE_EXPRESSION)
+            return
+        except Exception:
+            pass
+
+        tool = getattr(self, "tool", None)
+        diameter = 0.0
+        if tool is not None:
+            try:
+                diameter = float(tool.Diameter)
+            except Exception:
+                try:
+                    diameter = float(getattr(tool.Diameter, "Value", tool.Diameter))
+                except Exception:
+                    diameter = 0.0
+
+        value = max(0.0, diameter + 10.0)
+        if self._prototype_property(obj, "EntryClearance") is not None and not hasattr(
+            obj, "EntryClearance"
+        ):
+            self._set_operation_property_value(obj, "EntryClearance", value)
+            return
+
+        VolumeFaceMillUtils.set_distance_property(
+            obj,
+            "EntryClearance",
+            value,
+        )
+
     def _migrate_allowance_compatibility_properties(self, obj, added_properties):
         """Backfill new XY allowance props from any legacy X/Y prototype properties."""
 
@@ -537,6 +607,17 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
     def _clamp_stock_edge_clearance_non_negative(self, obj, prop_name):
         """Clamp stock-edge clearance to a non-negative value."""
+
+        value = self._distance_property_value(obj, prop_name)
+        if value is None or value >= 0.0:
+            return value
+
+        Path.Log.warning(f"{prop_name} cannot be negative; clamping to 0 mm.")
+        VolumeFaceMillUtils.set_distance_property(obj, prop_name, 0.0)
+        return 0.0
+
+    def _clamp_distance_non_negative(self, obj, prop_name):
+        """Clamp one distance property to non-negative."""
 
         value = self._distance_property_value(obj, prop_name)
         if value is None or value >= 0.0:
@@ -693,6 +774,24 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 _MATERIAL_STATE_MODE_DEFAULT,
             )
 
+    def _initialize_entry_side_property(self, obj, added_properties):
+        """Initialize or repair EntrySide."""
+
+        if not self._has_operation_property(obj, "EntrySide"):
+            return
+
+        valid_values = [
+            value for _label, value in self.propertyEnumerations(dataType="raw")["EntrySide"]
+        ]
+        current_value = self._get_operation_property_value(obj, "EntrySide")
+
+        if "EntrySide" in added_properties or current_value not in valid_values:
+            self._set_operation_property_value(
+                obj,
+                "EntrySide",
+                _ENTRY_SIDE_DEFAULT,
+            )
+
     def _validate_phase_1_cutting_strategy(self, obj):
         """Return True if the selected strategy is allowed in the current implementation phase."""
 
@@ -744,9 +843,12 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             for prop_name in _STOCK_EDGE_CLEARANCE_PROPERTIES:
                 if prop_name in added_properties:
                     self._set_stock_edge_clearance_default(obj, prop_name)
+            if "EntryClearance" in added_properties:
+                self._set_entry_clearance_default(obj)
             self._assign_property_enumerations(obj)
             self._initialize_cutting_strategy_property(obj, added_properties)
             self._initialize_material_state_property(obj, added_properties)
+            self._initialize_entry_side_property(obj, added_properties)
             self._backfill_volume_face_mill_allowance_contract(obj, added_properties)
         finally:
             self._backfilling_volume_face_mill_property_contract = previous_backfill_state
@@ -1304,6 +1406,8 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         obj.OptimizationMode = "None"
         obj.CuttingStrategy = _CUTTING_STRATEGY_DEFAULT
         obj.MaterialStateMode = _MATERIAL_STATE_MODE_DEFAULT
+        obj.EntrySide = _ENTRY_SIDE_DEFAULT
+        self._set_entry_clearance_default(obj)
         obj.FeatureAllowanceMode = _ALLOWANCE_MODE_DEFAULT
         obj.StockAllowanceMode = _ALLOWANCE_MODE_DEFAULT
 
@@ -1349,6 +1453,9 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
         if prop == "MaterialStateMode":
             pass
+
+        if prop == "EntryClearance":
+            self._clamp_distance_non_negative(obj, "EntryClearance")
 
         if prop in {"BoundaryShape", "ProtectModel"}:
             self._force_compatibility_properties(obj)
@@ -1546,6 +1653,12 @@ def SetupProperties():
 
     if "MaterialStateMode" not in setup:
         setup.append("MaterialStateMode")
+
+    if "EntrySide" not in setup:
+        setup.append("EntrySide")
+
+    if "EntryClearance" not in setup:
+        setup.append("EntryClearance")
 
     for prop in (
         "ProtectSelectedFeatures",

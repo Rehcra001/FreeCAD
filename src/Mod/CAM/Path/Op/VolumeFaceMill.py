@@ -261,11 +261,11 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             )
             added_properties.add("CuttingStrategy")
 
-        if not hasattr(obj, "MaterialStateMode"):
+        if not self._has_operation_property(obj, "MaterialStateMode"):
             obj.addProperty(
                 "App::PropertyEnumeration",
                 "MaterialStateMode",
-                "Path",
+                "Volume Face Mill",
                 QT_TRANSLATE_NOOP(
                     "App::Property",
                     "Material state used by Volume Face Mill.",
@@ -360,6 +360,96 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         except Exception:
             return None
 
+    @staticmethod
+    def _prototype_property(obj, prop_name):
+        """Return a setup-sheet prototype property object, or None.
+
+        Setup-sheet OpPrototype objects store properties in obj.properties and
+        do not expose them through normal hasattr(obj, prop_name). Real document
+        objects normally do not use this path.
+        """
+
+        properties = getattr(obj, "properties", None)
+        if not isinstance(properties, dict):
+            return None
+
+        return properties.get(prop_name)
+
+    @classmethod
+    def _has_operation_property(cls, obj, prop_name):
+        """Return True for real document properties and prototype properties."""
+
+        return hasattr(obj, prop_name) or cls._prototype_property(obj, prop_name) is not None
+
+    @classmethod
+    def _set_operation_property_value(cls, obj, prop_name, value):
+        """Set a property value on a real object or setup-sheet prototype.
+
+        For setup-sheet prototype PropertyEnumeration objects, setValue(list)
+        initializes the enum list used by getEnumValues(). This is the critical
+        behavior needed for setup-sheet enum metadata.
+        """
+
+        prototype_property = cls._prototype_property(obj, prop_name)
+        if prototype_property is not None and not hasattr(obj, prop_name):
+            try:
+                prototype_property.setValue(value)
+                return True
+            except Exception:
+                pass
+
+            try:
+                prototype_property.Value = value
+                return True
+            except Exception:
+                pass
+
+            return False
+
+        if hasattr(obj, prop_name):
+            try:
+                setattr(obj, prop_name, value)
+                return True
+            except Exception:
+                return False
+
+        return False
+
+    @classmethod
+    def _get_operation_property_value(cls, obj, prop_name, default=None):
+        """Read a property from a real object or setup-sheet prototype."""
+
+        if hasattr(obj, prop_name):
+            try:
+                return getattr(obj, prop_name)
+            except Exception:
+                return default
+
+        prototype_property = cls._prototype_property(obj, prop_name)
+        if prototype_property is None:
+            return default
+
+        for attr_name in ("Value", "value"):
+            if hasattr(prototype_property, attr_name):
+                try:
+                    return getattr(prototype_property, attr_name)
+                except Exception:
+                    pass
+
+        try:
+            return prototype_property.getValue()
+        except Exception:
+            return default
+
+    def _assign_property_enumerations(self, obj):
+        """Assign enum lists for real objects and setup-sheet prototypes."""
+
+        raw_enums = self.propertyEnumerations(dataType="raw")
+
+        for prop_name, enum_tuples in raw_enums.items():
+            enum_values = [value for _label, value in enum_tuples]
+            self._set_operation_property_value(obj, prop_name, enum_values)
+
     def _tool_radius_value(self):
         """Return the active tool radius in model units, or 0.0 if unavailable."""
 
@@ -433,13 +523,13 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         enums = self.propertyEnumerations(dataType="raw")
 
         for mode_prop in _ALLOWANCE_MODE_PROPERTIES:
-            if not hasattr(obj, mode_prop):
+            if not self._has_operation_property(obj, mode_prop):
                 continue
 
             valid_values = [value for _label, value in enums[mode_prop]]
-            current_value = getattr(obj, mode_prop, None)
+            current_value = self._get_operation_property_value(obj, mode_prop)
             if mode_prop in added_properties or current_value not in valid_values:
-                setattr(obj, mode_prop, _ALLOWANCE_MODE_DEFAULT)
+                self._set_operation_property_value(obj, mode_prop, _ALLOWANCE_MODE_DEFAULT)
 
         for distance_prop in _ALLOWANCE_DISTANCE_PROPERTIES:
             if distance_prop in added_properties and distance_prop not in migrated_properties:
@@ -560,13 +650,13 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
     def _initialize_cutting_strategy_property(self, obj, added_properties):
         """Initialize or backfill the Volume Face Mill cutting strategy."""
 
-        if not hasattr(obj, "CuttingStrategy"):
+        if not self._has_operation_property(obj, "CuttingStrategy"):
             return
 
         valid_values = [
             value for _label, value in self.propertyEnumerations(dataType="raw")["CuttingStrategy"]
         ]
-        current_value = getattr(obj, "CuttingStrategy", None)
+        current_value = self._get_operation_property_value(obj, "CuttingStrategy")
 
         if current_value in valid_values and "CuttingStrategy" not in added_properties:
             return
@@ -576,26 +666,32 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             mapped_value = _CUTTING_STRATEGY_FROM_CLEARING_PATTERN.get(str(obj.ClearingPattern))
 
         if mapped_value in valid_values:
-            obj.CuttingStrategy = mapped_value
+            self._set_operation_property_value(obj, "CuttingStrategy", mapped_value)
         else:
-            obj.CuttingStrategy = _CUTTING_STRATEGY_DEFAULT
+            self._set_operation_property_value(
+                obj,
+                "CuttingStrategy",
+                _CUTTING_STRATEGY_DEFAULT,
+            )
 
-    def _initialize_material_state_mode_property(self, obj, added_properties):
-        """Initialize or restore the Volume Face Mill material-state mode."""
+    def _initialize_material_state_property(self, obj, added_properties):
+        """Initialize or validate MaterialStateMode without relying on hasattr()."""
 
-        if not hasattr(obj, "MaterialStateMode"):
+        if not self._has_operation_property(obj, "MaterialStateMode"):
             return
 
         valid_values = [
             value
             for _label, value in self.propertyEnumerations(dataType="raw")["MaterialStateMode"]
         ]
-        current_value = getattr(obj, "MaterialStateMode", None)
+        current_value = self._get_operation_property_value(obj, "MaterialStateMode")
 
-        if current_value in valid_values and "MaterialStateMode" not in added_properties:
-            return
-
-        obj.MaterialStateMode = _MATERIAL_STATE_MODE_DEFAULT
+        if "MaterialStateMode" in added_properties or current_value not in valid_values:
+            self._set_operation_property_value(
+                obj,
+                "MaterialStateMode",
+                _MATERIAL_STATE_MODE_DEFAULT,
+            )
 
     def _validate_phase_1_cutting_strategy(self, obj):
         """Return True if the selected strategy is allowed in the current implementation phase."""
@@ -612,13 +708,6 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             return True
 
         return obj.MaterialStateMode in _MATERIAL_STATE_MODE_SUPPORTED_IN_PHASE_4
-
-    def _apply_volume_face_mill_property_enumerations(self, obj):
-        """Assign current enumeration value lists to supported VFM properties."""
-
-        for name, values in self.propertyEnumerations():
-            if hasattr(obj, name):
-                setattr(obj, name, values)
 
     def _backfill_volume_face_mill_allowance_contract(self, obj, added_properties):
         """Restore allowance migration and defaults for VFM allowance properties."""
@@ -655,9 +744,9 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
             for prop_name in _STOCK_EDGE_CLEARANCE_PROPERTIES:
                 if prop_name in added_properties:
                     self._set_stock_edge_clearance_default(obj, prop_name)
-            self._apply_volume_face_mill_property_enumerations(obj)
+            self._assign_property_enumerations(obj)
             self._initialize_cutting_strategy_property(obj, added_properties)
-            self._initialize_material_state_mode_property(obj, added_properties)
+            self._initialize_material_state_property(obj, added_properties)
             self._backfill_volume_face_mill_allowance_contract(obj, added_properties)
         finally:
             self._backfilling_volume_face_mill_property_contract = previous_backfill_state
@@ -1451,9 +1540,6 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
 
 def SetupProperties():
     setup = PathPocketBase.SetupProperties()
-
-    if "ClearingPattern" in setup:
-        setup.remove("ClearingPattern")
 
     if "CuttingStrategy" not in setup:
         setup.append("CuttingStrategy")

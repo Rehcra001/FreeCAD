@@ -451,6 +451,8 @@ SET(PathPythonBaseGenerator_SRCS
     Path/Base/Generator/tapping.py
     Path/Base/Generator/threadmilling.py
     Path/Base/Generator/toolchange.py
+    Path/Base/Generator/volume_face_mill_common.py
+    Path/Base/Generator/volume_face_mill_validation.py
 )
 
 SET(PathPythonGui_SRCS
@@ -598,6 +600,7 @@ SET(Tests_SRCS
     CAMTests/TestPathToolController.py
     CAMTests/TestPathUtil.py
     CAMTests/TestPathVcarve.py
+    CAMTests/TestPathVolumeFaceMillStrategy.py
     CAMTests/TestPathVolumeFaceMill.py
     CAMTests/TestPathVoronoi.py
     CAMTests/TestGrblLegacyPost.py

@@ -225,6 +225,16 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertSuccessfulRecompute(self.doc)
         return job
 
+    def _make_volume_face_mill_setup_sheet_prototype(self, opname):
+        previous_registration = PathSetupSheet._RegisteredOps.get(opname)
+        PathSetupSheet.RegisterOperation(
+            opname,
+            PathVolumeFaceMill.Create,
+            PathVolumeFaceMill.SetupProperties,
+        )
+        prototype = PathSetupSheet._RegisteredOps[opname].prototype(opname)
+        return prototype, previous_registration
+
     def _make_job_without_stock(self):
         model = self._make_model_with_boss()
         job = PathJob.Create("JobNoStock", [model], None)
@@ -315,12 +325,14 @@ class TestPathVolumeFaceMill(PathTestBase):
         op.setExpression(prop_name, None)
         getattr(op, prop_name).Value = value
         op.Proxy.areaOpOnChanged(op, prop_name)
+        op.touch()
 
     def _set_allowance_mode(self, op, prop_name, value):
         """Set an allowance mode and force the operation property-change path."""
 
         setattr(op, prop_name, value)
         op.Proxy.areaOpOnChanged(op, prop_name)
+        op.touch()
 
     def _tool_radius(self, op):
         diameter = getattr(
@@ -1074,11 +1086,11 @@ class TestPathVolumeFaceMill(PathTestBase):
             ],
         )
 
-    def test_cutting_strategy_setup_properties_replace_clearing_pattern(self):
+    def test_cutting_strategy_setup_properties_keep_clearing_pattern_compatibility(self):
         setup_properties = PathVolumeFaceMill.SetupProperties()
 
         self.assertIn("CuttingStrategy", setup_properties)
-        self.assertNotIn("ClearingPattern", setup_properties)
+        self.assertIn("ClearingPattern", setup_properties)
 
     def test_material_state_mode_defaults_to_full_stock(self):
         _job, _model, op = self._create_operation(name="material_state_default")
@@ -1197,6 +1209,63 @@ class TestPathVolumeFaceMill(PathTestBase):
 
             restored_setup_sheet.Proxy.setOperationProperties(op, opname)
             self.assertEqual(op.MaterialStateMode, "RemainingMaterial")
+        finally:
+            if previous_registration is None:
+                PathSetupSheet._RegisteredOps.pop(opname, None)
+            else:
+                PathSetupSheet._RegisteredOps[opname] = previous_registration
+
+    def test_setup_sheet_prototype_material_state_mode_enum_values_are_initialized(self):
+        opname = "VolumeFaceMillMaterialStatePrototypeEnums"
+        prototype, previous_registration = self._make_volume_face_mill_setup_sheet_prototype(opname)
+
+        try:
+            material_state_property = prototype.properties["MaterialStateMode"]
+            self.assertEqual(
+                list(material_state_property.getEnumValues()),
+                ["FullStock", "RemainingMaterial"],
+            )
+        finally:
+            if previous_registration is None:
+                PathSetupSheet._RegisteredOps.pop(opname, None)
+            else:
+                PathSetupSheet._RegisteredOps[opname] = previous_registration
+
+    def test_setup_sheet_prototype_volume_face_mill_enum_values_are_initialized(self):
+        opname = "VolumeFaceMillPrototypeAllEnums"
+        prototype, previous_registration = self._make_volume_face_mill_setup_sheet_prototype(opname)
+
+        try:
+            expected_enums = {
+                "CuttingStrategy": [
+                    "StrictRaster",
+                    "SquareSpiral",
+                    "RoundSpiral",
+                    "OffsetLoops",
+                    "Auto",
+                ],
+                "MaterialStateMode": [
+                    "FullStock",
+                    "RemainingMaterial",
+                ],
+                "FeatureAllowanceMode": [
+                    "Linked",
+                    "Independent",
+                ],
+                "StockAllowanceMode": [
+                    "Linked",
+                    "Independent",
+                ],
+                "OptimizationMode": [
+                    "None",
+                    "MinTravel",
+                ],
+            }
+
+            for prop_name, expected_values in expected_enums.items():
+                with self.subTest(prop_name=prop_name):
+                    prop = prototype.properties[prop_name]
+                    self.assertEqual(list(prop.getEnumValues()), expected_values)
         finally:
             if previous_registration is None:
                 PathSetupSheet._RegisteredOps.pop(opname, None)
@@ -1951,6 +2020,63 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertAlmostEqual(op.StockEdgeClearanceX.Value, original_x, places=6)
         self.assertAlmostEqual(op.StockEdgeClearanceY.Value, original_y, places=6)
 
+    def test_stock_edge_clearance_gui_helper_does_not_call_proxy_change_hook_directly(self):
+        class _RaisingProxy:
+            def areaOpOnChanged(self, _obj, _prop_name):
+                raise AssertionError("GUI must not call the App proxy change hook directly")
+
+        class _FakeDistanceProperty:
+            def __init__(self, value):
+                self.Value = float(value)
+
+        class _FakeStockEdgeOperation:
+            def __init__(self):
+                self.StockEdgeClearanceX = _FakeDistanceProperty(5.0)
+                self.StockEdgeClearanceY = _FakeDistanceProperty(6.0)
+                self.ExpressionEngine = [
+                    ("StockEdgeClearanceX", "OpToolDiameter / 2 + 0.1 mm"),
+                    ("StockEdgeClearanceY", "OpToolDiameter / 2 + 0.1 mm"),
+                ]
+                self.Proxy = _RaisingProxy()
+
+            def setExpression(self, prop_name, expression):
+                self.ExpressionEngine = [
+                    (current_prop, current_expression)
+                    for current_prop, current_expression in self.ExpressionEngine
+                    if current_prop != prop_name
+                ]
+                if expression is not None:
+                    self.ExpressionEngine.append((prop_name, expression))
+
+        op = _FakeStockEdgeOperation()
+        gui_module = self._load_headless_volume_face_mill_gui_module()
+        controller = gui_module.TaskPanelOpPage.__new__(gui_module.TaskPanelOpPage)
+        controller.form = types.SimpleNamespace(
+            featureAllowanceMode=_FakeComboBox("Linked"),
+            stockAllowanceMode=_FakeComboBox("Linked"),
+            featureAllowanceLinkedFrame=_FakeFrame(),
+            featureAllowanceIndependentFrame=_FakeFrame(),
+            stockAllowanceLinkedFrame=_FakeFrame(),
+            stockAllowanceIndependentFrame=_FakeFrame(),
+            featureAllowanceLinked=_FakeQuantityWidget(0.0),
+            featureAllowanceXY=_FakeQuantityWidget(0.0),
+            featureAllowanceZ=_FakeQuantityWidget(0.0),
+            stockAllowanceLinked=_FakeQuantityWidget(0.0),
+            stockAllowanceXY=_FakeQuantityWidget(0.0),
+            stockAllowanceZ=_FakeQuantityWidget(0.0),
+            stockEdgeClearanceX=_FakeQuantityWidget(5.0),
+            stockEdgeClearanceY=_FakeQuantityWidget(6.0),
+        )
+        controller.initPage(op)
+
+        controller._mark_stock_edge_clearance_property_edited("StockEdgeClearanceX")
+        controller._update_stock_edge_clearance_properties_from_form(op)
+
+        self.assertIsNone(self._expression_for_property(op, "StockEdgeClearanceX"))
+        self.assertIsNotNone(self._expression_for_property(op, "StockEdgeClearanceY"))
+        self.assertAlmostEqual(op.StockEdgeClearanceX.Value, 5.0, places=6)
+        self.assertAlmostEqual(op.StockEdgeClearanceY.Value, 6.0, places=6)
+
     def test_gui_update_data_does_not_refresh_while_applying_form_fields(self):
         module = self._load_headless_volume_face_mill_gui_module()
         page = module.TaskPanelOpPage.__new__(module.TaskPanelOpPage)
@@ -2259,6 +2385,56 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertFalse(op.removalshape.isNull())
         warning_mock.assert_called()
         self.assertIn("Feature Allowance cutting sections", warning_mock.call_args[0][0])
+
+    def test_allowance_keepout_construction_failure_aborts_safely(self):
+        job, model = self._make_job_with_25mm_stock_above_model()
+        top_face = self._highest_horizontal_face_name(model.Shape)
+        _job, _model, op = self._create_operation(
+            name="allowance_keepout_failure_aborts_safely",
+            job=job,
+            model=model,
+            base=[(model, [top_face])],
+            clear_edges=False,
+            step_down=5.0,
+        )
+
+        self._set_allowance_mode(op, "FeatureAllowanceMode", "Linked")
+        self._set_allowance_distance(op, "FeatureAllowanceXY", 1.0)
+
+        warning_messages = []
+
+        def capture_warning(message):
+            warning_messages.append(str(message))
+            return None
+
+        with mock.patch.object(
+            PathVolumeFaceMillUtils,
+            "_protected_slab",
+            return_value=Part.makeBox(10.0, 10.0, 2.0, FreeCAD.Vector(40.0, 40.0, 8.0)),
+        ), mock.patch.object(
+            PathVolumeFaceMillUtils,
+            "_layer_keepout_footprint",
+            return_value=None,
+        ), mock.patch.object(
+            PathVolumeFaceMillUtils,
+            "_fallback_keepout_box_from_slab",
+            return_value=None,
+        ), mock.patch.object(
+            Path.Log,
+            "warning",
+            side_effect=capture_warning,
+        ):
+            self.assertSuccessfulRecompute(self.doc, op)
+
+        self.assertEqual(len(self._cutting_moves(op.Path)), 0)
+        self.assertTrue(op.removalshape.isNull())
+        self.assertTrue(
+            any(
+                "aborting feature-allowance generation to avoid under-protecting geometry."
+                in message
+                for message in warning_messages
+            )
+        )
 
     def test_standard_generation_without_realizable_depth_fails_safely(self):
         job, model = self._make_job_with_25mm_stock_above_model()
@@ -3007,6 +3183,103 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertGreater(
             getattr(op.removalshape.common(outside_taper_near_top), "Volume", 0.0),
             1e-6,
+        )
+
+    def test_selected_model_profiles_fall_back_to_whole_base_shape_when_precise_keepout_fails(self):
+        model = self._make_drafted_model()
+        job = self._make_job_with_custom_stock_and_model(model, FreeCAD.Vector(100, 100, 46))
+        target_face = self._highest_horizontal_face_name(model.Shape)
+        side_faces = self._vertical_face_names(model.Shape)
+
+        _job, _model, op = self._create_operation(
+            name="selected_model_profile_whole_base_fallback",
+            job=job,
+            model=model,
+            base=[(model, [target_face] + side_faces)],
+            protect_selected_features=True,
+            step_down=5.0,
+            tool_diameter=50.0,
+        )
+
+        warning_messages = []
+
+        def capture_warning(message):
+            warning_messages.append(str(message))
+            return None
+
+        with mock.patch.object(
+            PathVolumeFaceMillUtils,
+            "_build_selected_feature_volume",
+            return_value=None,
+        ), mock.patch.object(
+            PathVolumeFaceMillUtils.PathUtils,
+            "getEnvelope",
+            side_effect=AssertionError(
+                "Per-profile keepout envelopes should not be used when whole-base fallback exists"
+            ),
+        ), mock.patch.object(
+            Path.Log,
+            "warning",
+            side_effect=capture_warning,
+        ):
+            op.touch()
+            self.assertSuccessfulRecompute(self.doc, op)
+
+        self.assertGreater(len(self._cutting_moves(op.Path)), 0)
+        self.assertFalse(op.removalshape.isNull())
+        self.assertTrue(
+            any(
+                "using the whole selected base shape to avoid under-protecting geometry." in message
+                for message in warning_messages
+            )
+        )
+
+    def test_selected_non_volumetric_keepout_failure_aborts_safely(self):
+        job, model = self._make_job_with_stock_and_model()
+        target_face = self._highest_horizontal_face_name(model.Shape)
+        surface = self.doc.addObject("Part::Feature", "AuxSurfaceKeepout")
+        surface.Shape = Part.makePlane(20.0, 20.0, FreeCAD.Vector(10.0, 10.0, 10.0))
+        self.assertSuccessfulRecompute(self.doc)
+
+        _job, _model, op = self._create_operation(
+            name="selected_non_volumetric_keepout_failure",
+            job=job,
+            model=model,
+            base=[(model, [target_face]), (surface, ["Face1"])],
+            protect_selected_features=True,
+            step_down=5.0,
+        )
+
+        warning_messages = []
+
+        def capture_warning(message):
+            warning_messages.append(str(message))
+            return None
+
+        with mock.patch.object(
+            PathVolumeFaceMillUtils,
+            "_build_selected_feature_volume",
+            return_value=None,
+        ), mock.patch.object(
+            PathVolumeFaceMillUtils.PathUtils,
+            "getEnvelope",
+            side_effect=RuntimeError("surface keepout envelope failure"),
+        ), mock.patch.object(
+            Path.Log,
+            "warning",
+            side_effect=capture_warning,
+        ):
+            op.touch()
+            self.assertSuccessfulRecompute(self.doc, op)
+
+        self.assertEqual(len(self._cutting_moves(op.Path)), 0)
+        self.assertTrue(op.removalshape.isNull())
+        self.assertTrue(
+            any(
+                "aborting selected-geometry protection to avoid under-protecting geometry"
+                in message
+                for message in warning_messages
+            )
         )
 
     def test_step_down_generates_expected_z_levels(self):

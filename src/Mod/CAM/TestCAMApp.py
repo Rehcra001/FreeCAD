@@ -109,6 +109,7 @@ from CAMTests.TestPathToolChangeGenerator import TestPathToolChangeGenerator
 from CAMTests.TestPathToolController import TestPathToolController
 from CAMTests.TestPathUtil import TestPathUtil
 from CAMTests.TestPathVcarve import TestPathVcarve
+from CAMTests.TestPathVolumeFaceMillStrategy import TestPathVolumeFaceMillStrategy
 from CAMTests.TestPathVolumeFaceMill import TestPathVolumeFaceMill
 from CAMTests.TestPathVoronoi import TestPathVoronoi
 

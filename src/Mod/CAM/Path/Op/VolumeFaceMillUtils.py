@@ -437,9 +437,7 @@ def _selected_keepout_depthparams(obj, depthparams):
 def _selected_keepout_uses_whole_base(obj, base):
     """Return whether a selected keepout should conservatively use the whole base shape."""
 
-    job = find_job(obj)
-    model_group = getattr(getattr(job, "Model", None), "Group", []) if job else []
-    return base not in model_group
+    return not base_belongs_to_job_model(obj, base)
 
 
 def _build_selected_feature_volume(base_shape, profile_shapes, keepout_depthparams):
@@ -492,7 +490,10 @@ def is_target_face(shape, target_faces):
 
 
 def selected_keepout_shapes(obj, target_faces, depthparams):
-    """Return additional selected keepout volumes, excluding target-depth faces."""
+    """Return additional selected keepout volumes, excluding target-depth faces.
+
+    Returns ``None`` if requested keepout protection cannot be built conservatively.
+    """
 
     if not getattr(obj, "ProtectSelectedFeatures", False):
         return []
@@ -535,6 +536,14 @@ def selected_keepout_shapes(obj, target_faces, depthparams):
             keepout_shapes.append(selected_volume)
             continue
 
+        if _shape_has_volume(base_shape):
+            Path.Log.warning(
+                "Could not isolate selected keepout volume precisely; "
+                "using the whole selected base shape to avoid under-protecting geometry."
+            )
+            keepout_shapes.append(base_shape)
+            continue
+
         for profile_shape in profile_shapes:
             try:
                 keepout = PathUtils.getEnvelope(
@@ -543,8 +552,12 @@ def selected_keepout_shapes(obj, target_faces, depthparams):
                     depthparams=keepout_depthparams,
                 )
             except Exception as exc:
-                Path.Log.warning(f"Could not create keepout envelope for selected geometry: {exc}")
-                continue
+                Path.Log.warning(
+                    "Could not create keepout envelope for selected geometry and "
+                    "no conservative whole-base keepout is available; "
+                    f"aborting selected-geometry protection to avoid under-protecting geometry: {exc}"
+                )
+                return None
 
             if not shape_is_empty(keepout):
                 keepout_shapes.append(keepout)
@@ -979,6 +992,8 @@ def build_layered_allowance_removal_volume(
         target_faces=target_faces,
         depthparams=depthparams,
     )
+    if protected_shapes is None:
+        return None
 
     allowance_breakpoints = _feature_allowance_depth_breakpoints(
         protected_shapes=protected_shapes,
@@ -1067,9 +1082,9 @@ def build_layered_allowance_removal_volume(
             if layer_keepout is None:
                 Path.Log.warning(
                     "Could not build allowance keepout for one protected slab; "
-                    "skipping that slab to avoid aborting the entire operation."
+                    "aborting feature-allowance generation to avoid under-protecting geometry."
                 )
-                continue
+                return None
 
             try:
                 protected_overlap = layer_boundary.common(layer_keepout)
@@ -1125,7 +1140,11 @@ def build_protected_shapes(obj, model, target_faces, depthparams):
     if model_shape is not None:
         protected_shapes.append(model_shape)
 
-    protected_shapes.extend(selected_keepout_shapes(obj, target_faces, depthparams))
+    selected_keepouts = selected_keepout_shapes(obj, target_faces, depthparams)
+    if selected_keepouts is None:
+        return None
+
+    protected_shapes.extend(selected_keepouts)
     return [shape for shape in protected_shapes if not shape_is_empty(shape)]
 
 
@@ -1134,7 +1153,7 @@ def build_protected_shape(obj, model, target_faces, depthparams):
 
     protected_shapes = build_protected_shapes(obj, model, target_faces, depthparams)
 
-    if not protected_shapes:
+    if protected_shapes is None or not protected_shapes:
         return None
 
     if len(protected_shapes) == 1:
@@ -1190,12 +1209,21 @@ def build_removal_volume(obj, model, tool_radius, depthparams):
     if boundary is None:
         return None
 
-    protected = build_protected_shape(
+    protected_shapes = build_protected_shapes(
         obj=obj,
         model=model,
         target_faces=target_faces,
         depthparams=depthparams,
     )
+    if protected_shapes is None:
+        return None
+
+    if not protected_shapes:
+        protected = None
+    elif len(protected_shapes) == 1:
+        protected = protected_shapes[0]
+    else:
+        protected = Part.makeCompound(protected_shapes)
 
     if protected is not None:
         try:

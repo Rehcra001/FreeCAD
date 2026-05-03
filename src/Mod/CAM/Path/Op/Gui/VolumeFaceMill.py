@@ -216,8 +216,6 @@ class TaskPanelOpPage(PathPocketBaseGui.TaskPanelOpPage):
                 pass
 
             VolumeFaceMillUtils.set_distance_property(obj, prop_name, value)
-            if getattr(obj, "Proxy", None):
-                obj.Proxy.areaOpOnChanged(obj, prop_name)
         finally:
             if user_edited:
                 self._edited_stock_edge_clearance_properties.discard(prop_name)

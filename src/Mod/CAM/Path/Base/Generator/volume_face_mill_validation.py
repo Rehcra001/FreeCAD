@@ -266,6 +266,9 @@ def validate_no_plunge_into_uncut_stock(
 def validate_no_cut_crosses_keepout(cut_segments, protected_regions, tool_radius, tolerance=1e-6):
     """Validate that cut footprints do not overlap protected regions."""
 
+    if not cut_segments or not protected_regions:
+        return []
+
     errors = []
 
     for cut_index, cut in enumerate(cut_segments or []):

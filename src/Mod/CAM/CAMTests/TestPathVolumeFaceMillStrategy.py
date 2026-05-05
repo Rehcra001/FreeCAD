@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 import FreeCAD
+import Path
 import Part
 
 from CAMTests.PathTestUtils import PathTestBase
 import Path.Base.Generator.volume_face_mill_common as common
 import Path.Base.Generator.volume_face_mill_entry as entry
 import Path.Base.Generator.volume_face_mill_sections as sections
+import Path.Base.Generator.volume_face_mill_strict_raster as strict_raster
 import Path.Base.Generator.volume_face_mill_validation as validation
 
 
@@ -50,6 +52,44 @@ class TestPathVolumeFaceMillStrategy(PathTestBase):
             outer_wire=self._make_rectangle_wire(xmin, xmax, ymin, ymax, z),
             inner_wires=list(inner_wires or []),
             region_id=int(region_id),
+        )
+
+    def _strict_raster_entry_plan(self, entry_side="-X", entry_clearance=10.0):
+        return entry.make_entry_plan(
+            Part.makeBox(100.0, 100.0, 20.0, FreeCAD.Vector(0, 0, 0)).BoundBox,
+            entry_side=entry_side,
+            entry_clearance=entry_clearance,
+        )
+
+    def _generate_strict_raster(
+        self,
+        regions,
+        cut_mode="Climb",
+        angle_degrees=0.0,
+        tool_diameter=10.0,
+        stepover_percent=50.0,
+        clearance_height=15.0,
+        safe_height=20.0,
+        entry_side="-X",
+        entry_clearance=10.0,
+    ):
+        return strict_raster.generate(
+            regions=regions,
+            stock_boundbox=Part.makeBox(100.0, 100.0, 20.0, FreeCAD.Vector(0, 0, 0)).BoundBox,
+            tool_diameter=tool_diameter,
+            stepover_percent=stepover_percent,
+            cut_mode=cut_mode,
+            angle_degrees=angle_degrees,
+            entry_plan=self._strict_raster_entry_plan(
+                entry_side=entry_side,
+                entry_clearance=entry_clearance,
+            ),
+            clearance_height=clearance_height,
+            safe_height=safe_height,
+            horiz_feed=500.0,
+            vert_feed=250.0,
+            horiz_rapid=1500.0,
+            vert_rapid=800.0,
         )
 
     def test_motion_kind_constants_are_stable(self):
@@ -566,3 +606,350 @@ class TestPathVolumeFaceMillStrategy(PathTestBase):
         self.assertFalse(motion.is_retracted)
         self.assertAlmostEqual(motion.z_start, 5.0, places=6)
         self.assertAlmostEqual(motion.z_end, 5.0, places=6)
+
+    def test_strict_raster_empty_regions_returns_empty_valid_result(self):
+        result = self._generate_strict_raster([])
+
+        self.assertEqual(result.strategy, "StrictRaster")
+        self.assertEqual(result.layers, [])
+        self.assertEqual(result.commands, [])
+        self.assertEqual(result.validation_errors, [])
+
+    def test_strict_raster_rejects_invalid_tool_diameter(self):
+        result = self._generate_strict_raster(
+            [self._make_region(10, 90, 10, 90, 5.0)],
+            tool_diameter=0.0,
+        )
+
+        self.assertIn("Tool diameter must be greater than zero", result.validation_errors)
+
+    def test_strict_raster_rejects_invalid_stepover(self):
+        result = self._generate_strict_raster(
+            [self._make_region(10, 90, 10, 90, 5.0)],
+            stepover_percent=0.0,
+        )
+
+        self.assertIn("StepOver must be greater than zero", result.validation_errors)
+
+    def test_strict_raster_rejects_unsupported_cut_mode(self):
+        result = self._generate_strict_raster(
+            [self._make_region(10, 90, 10, 90, 5.0)],
+            cut_mode="Bidirectional",
+        )
+
+        self.assertIn(
+            "Unsupported cut mode for StrictRaster: Bidirectional",
+            result.validation_errors,
+        )
+
+    def test_strict_raster_climb_cuts_do_not_reverse(self):
+        result = self._generate_strict_raster([self._make_region(10, 90, 10, 90, 5.0)])
+
+        self.assertGreater(len(result.layers[0].cut_segments), 0)
+        for cut in result.layers[0].cut_segments:
+            self.assertEqual(cut.cut_mode, "Climb")
+            self.assertFalse(cut.can_reverse)
+            self.assertAlmostEqual(cut.start.x, cut.original_start.x, places=6)
+            self.assertAlmostEqual(cut.end.x, cut.original_end.x, places=6)
+            self.assertGreaterEqual(cut.start.x, cut.end.x)
+
+    def test_strict_raster_conventional_cuts_do_not_reverse(self):
+        result = self._generate_strict_raster(
+            [self._make_region(10, 90, 10, 90, 5.0)],
+            cut_mode="Conventional",
+        )
+
+        self.assertGreater(len(result.layers[0].cut_segments), 0)
+        for cut in result.layers[0].cut_segments:
+            self.assertEqual(cut.cut_mode, "Conventional")
+            self.assertFalse(cut.can_reverse)
+            self.assertAlmostEqual(cut.start.x, cut.original_start.x, places=6)
+            self.assertAlmostEqual(cut.end.x, cut.original_end.x, places=6)
+            self.assertLessEqual(cut.start.x, cut.end.x)
+
+    def test_strict_raster_generates_entry_plunge_for_each_layer(self):
+        result = self._generate_strict_raster(
+            [
+                self._make_region(10, 90, 10, 90, 8.0, region_id=1),
+                self._make_region(20, 80, 20, 80, 4.0, region_id=2),
+            ]
+        )
+
+        motion_kinds = [motion.kind for layer in result.layers for motion in layer.motions]
+        self.assertEqual(motion_kinds.count(common.MOTION_ENTRY_PLUNGE), 2)
+
+    def test_strict_raster_uses_outside_reentry_after_first_cut(self):
+        result = self._generate_strict_raster([self._make_region(10, 90, 10, 90, 5.0)])
+        layer = result.layers[0]
+        outside_reentries = [
+            motion for motion in layer.motions if motion.kind == common.MOTION_OUTSIDE_REENTRY
+        ]
+
+        self.assertGreater(len(layer.cut_segments), 1)
+        self.assertEqual(len(outside_reentries), len(layer.cut_segments) - 1)
+
+    def test_strict_raster_uses_phase_6_x_entry_lead_in_alignment(self):
+        result = self._generate_strict_raster(
+            [self._make_region(10, 90, 10, 90, 5.0)],
+            entry_side="-X",
+        )
+
+        layer = result.layers[0]
+        first_cut_index = next(
+            index for index, motion in enumerate(layer.motions) if motion.kind == common.MOTION_CUT
+        )
+        initial_rapid = layer.motions[first_cut_index - 4]
+        entry_plunge = layer.motions[first_cut_index - 3]
+        lead_in_approach = layer.motions[first_cut_index - 2]
+        lead_in_motion = layer.motions[first_cut_index - 1]
+        first_cut = layer.cut_segments[0]
+        first_cut_start = first_cut.start
+
+        self.assertEqual(initial_rapid.kind, common.MOTION_RAPID)
+        self.assertEqual(entry_plunge.kind, common.MOTION_ENTRY_PLUNGE)
+        self.assertEqual(lead_in_approach.kind, common.MOTION_LEAD_IN)
+        self.assertEqual(lead_in_motion.kind, common.MOTION_LEAD_IN)
+        self.assertAlmostEqual(float(initial_rapid.commands[0].Parameters["X"]), -10.0, places=6)
+        self.assertAlmostEqual(float(initial_rapid.commands[0].Parameters["Y"]), 50.0, places=6)
+        self.assertAlmostEqual(entry_plunge.end.x, lead_in_approach.start.x, places=6)
+        self.assertAlmostEqual(entry_plunge.end.y, lead_in_approach.start.y, places=6)
+        self.assertAlmostEqual(lead_in_approach.start.x, -10.0, places=6)
+        self.assertAlmostEqual(lead_in_approach.start.y, 50.0, places=6)
+        self.assertAlmostEqual(lead_in_approach.end.x, -10.0, places=6)
+        self.assertAlmostEqual(lead_in_approach.end.y, first_cut_start.y, places=6)
+        self.assertAlmostEqual(lead_in_approach.end.x, lead_in_motion.start.x, places=6)
+        self.assertAlmostEqual(lead_in_approach.end.y, lead_in_motion.start.y, places=6)
+        self.assertAlmostEqual(lead_in_motion.start.x, -10.0, places=6)
+        self.assertAlmostEqual(lead_in_motion.start.y, first_cut_start.y, places=6)
+        self.assertAlmostEqual(lead_in_motion.end.x, first_cut_start.x, places=6)
+        self.assertAlmostEqual(lead_in_motion.end.y, first_cut_start.y, places=6)
+        self.assertAlmostEqual(
+            float(lead_in_approach.commands[0].Parameters["X"]),
+            -10.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(lead_in_approach.commands[0].Parameters["Y"]),
+            first_cut_start.y,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(lead_in_motion.commands[0].Parameters["X"]),
+            first_cut_start.x,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(lead_in_motion.commands[0].Parameters["Y"]),
+            first_cut_start.y,
+            places=6,
+        )
+
+    def test_strict_raster_uses_phase_6_y_entry_lead_in_alignment(self):
+        result = self._generate_strict_raster(
+            [self._make_region(10, 90, 10, 90, 5.0)],
+            entry_side="+Y",
+        )
+
+        layer = result.layers[0]
+        first_cut_index = next(
+            index for index, motion in enumerate(layer.motions) if motion.kind == common.MOTION_CUT
+        )
+        initial_rapid = layer.motions[first_cut_index - 4]
+        entry_plunge = layer.motions[first_cut_index - 3]
+        lead_in_approach = layer.motions[first_cut_index - 2]
+        lead_in_motion = layer.motions[first_cut_index - 1]
+        first_cut = layer.cut_segments[0]
+        first_cut_start = first_cut.start
+
+        self.assertEqual(initial_rapid.kind, common.MOTION_RAPID)
+        self.assertEqual(entry_plunge.kind, common.MOTION_ENTRY_PLUNGE)
+        self.assertEqual(lead_in_approach.kind, common.MOTION_LEAD_IN)
+        self.assertEqual(lead_in_motion.kind, common.MOTION_LEAD_IN)
+        self.assertAlmostEqual(float(initial_rapid.commands[0].Parameters["X"]), 50.0, places=6)
+        self.assertAlmostEqual(float(initial_rapid.commands[0].Parameters["Y"]), 110.0, places=6)
+        self.assertAlmostEqual(entry_plunge.end.x, lead_in_approach.start.x, places=6)
+        self.assertAlmostEqual(entry_plunge.end.y, lead_in_approach.start.y, places=6)
+        self.assertAlmostEqual(lead_in_approach.start.x, 50.0, places=6)
+        self.assertAlmostEqual(lead_in_approach.start.y, 110.0, places=6)
+        self.assertAlmostEqual(lead_in_approach.end.x, first_cut_start.x, places=6)
+        self.assertAlmostEqual(lead_in_approach.end.y, 110.0, places=6)
+        self.assertAlmostEqual(lead_in_approach.end.x, lead_in_motion.start.x, places=6)
+        self.assertAlmostEqual(lead_in_approach.end.y, lead_in_motion.start.y, places=6)
+        self.assertAlmostEqual(lead_in_motion.start.x, first_cut_start.x, places=6)
+        self.assertAlmostEqual(lead_in_motion.start.y, 110.0, places=6)
+        self.assertAlmostEqual(lead_in_motion.end.x, first_cut_start.x, places=6)
+        self.assertAlmostEqual(lead_in_motion.end.y, first_cut_start.y, places=6)
+        self.assertAlmostEqual(
+            float(lead_in_approach.commands[0].Parameters["X"]),
+            first_cut_start.x,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(lead_in_approach.commands[0].Parameters["Y"]),
+            110.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(lead_in_motion.commands[0].Parameters["X"]),
+            first_cut_start.x,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(lead_in_motion.commands[0].Parameters["Y"]),
+            first_cut_start.y,
+            places=6,
+        )
+
+    def test_strict_raster_does_not_use_internal_replunge(self):
+        result = self._generate_strict_raster([self._make_region(10, 90, 10, 90, 5.0)])
+
+        self.assertFalse(
+            any(
+                motion.kind == common.MOTION_INTERNAL_REPLUNGE
+                for layer in result.layers
+                for motion in layer.motions
+            )
+        )
+
+    def test_strict_raster_does_not_use_stay_down_link(self):
+        result = self._generate_strict_raster([self._make_region(10, 90, 10, 90, 5.0)])
+
+        self.assertFalse(
+            any(
+                motion.kind == common.MOTION_STAY_DOWN_LINK
+                for layer in result.layers
+                for motion in layer.motions
+            )
+        )
+
+    def test_strict_raster_avoids_inner_island_intervals(self):
+        island = self._make_rectangle_wire(40, 60, 40, 60, 5.0)
+        result = self._generate_strict_raster(
+            [self._make_region(10, 90, 10, 90, 5.0, inner_wires=[island])],
+            cut_mode="Conventional",
+        )
+
+        crossing_island = False
+        for cut in result.layers[0].cut_segments:
+            in_island_band = 40.0 <= cut.start.y <= 60.0 and 40.0 <= cut.end.y <= 60.0
+            spans_island = min(cut.start.x, cut.end.x) < 40.0 and max(cut.start.x, cut.end.x) > 60.0
+            if in_island_band and spans_island:
+                crossing_island = True
+                break
+
+        self.assertFalse(crossing_island)
+
+    def test_strict_raster_result_passes_validation(self):
+        result = self._generate_strict_raster([self._make_region(10, 90, 10, 90, 5.0)])
+
+        self.assertEqual(result.validation_errors, [])
+
+    def test_strict_raster_commands_are_path_commands(self):
+        result = self._generate_strict_raster([self._make_region(10, 90, 10, 90, 5.0)])
+
+        self.assertGreater(len(result.commands), 0)
+        self.assertTrue(all(isinstance(command, Path.Command) for command in result.commands))
+        self.assertTrue(
+            all(
+                isinstance(command, Path.Command)
+                for layer in result.layers
+                for motion in layer.motions
+                for command in motion.commands
+            )
+        )
+
+    def test_strict_raster_records_cutting_and_rapid_lengths(self):
+        result = self._generate_strict_raster([self._make_region(10, 90, 10, 90, 5.0)])
+        all_motions = [motion for layer in result.layers for motion in layer.motions]
+        expected_cutting = sum(
+            common.motion_length(motion)
+            for motion in all_motions
+            if motion.kind == common.MOTION_CUT
+        )
+        expected_rapid = sum(
+            common.motion_length(motion)
+            for motion in all_motions
+            if motion.kind != common.MOTION_CUT
+        )
+        expected_retracts = sum(1 for motion in all_motions if motion.kind == common.MOTION_RETRACT)
+
+        self.assertAlmostEqual(result.cutting_length, expected_cutting, places=6)
+        self.assertAlmostEqual(result.rapid_length, expected_rapid, places=6)
+        self.assertEqual(result.retract_count, expected_retracts)
+
+    def test_strict_raster_populates_cleared_region_for_non_empty_layers(self):
+        result = self._generate_strict_raster([self._make_region(10, 90, 10, 90, 5.0)])
+
+        self.assertGreater(len(result.layers), 0)
+        for layer in result.layers:
+            if not layer.cut_segments:
+                continue
+            self.assertIsNotNone(layer.cleared_state)
+            self.assertIsNotNone(layer.cleared_state.cleared_region)
+            self.assertGreater(getattr(layer.cleared_state.cleared_region, "Area", 0.0), 0.0)
+
+    def test_strict_raster_from_real_removal_volume_regions(self):
+        stock = Part.makeBox(100.0, 100.0, 10.0, FreeCAD.Vector(0.0, 0.0, 0.0))
+        island = Part.makeBox(20.0, 20.0, 10.0, FreeCAD.Vector(40.0, 40.0, 0.0))
+        removal = stock.cut(island)
+        regions = sections.make_cut_regions(removal, [5.0])
+        plan = entry.make_entry_plan(stock.BoundBox, "-X", 10.0)
+
+        result = strict_raster.generate(
+            regions=regions,
+            stock_boundbox=stock.BoundBox,
+            tool_diameter=10.0,
+            stepover_percent=50.0,
+            cut_mode="Climb",
+            angle_degrees=0.0,
+            entry_plan=plan,
+            clearance_height=15.0,
+            safe_height=20.0,
+            horiz_feed=500.0,
+            vert_feed=250.0,
+            horiz_rapid=1500.0,
+            vert_rapid=800.0,
+        )
+
+        self.assertGreater(len(result.commands), 0)
+        self.assertEqual(result.validation_errors, [])
+        self.assertGreater(len(result.layers), 0)
+        for layer in result.layers:
+            for cut in layer.cut_segments:
+                self.assertFalse(cut.can_reverse)
+
+    def test_strict_raster_result_from_sections_passes_validation(self):
+        stock = Part.makeBox(100.0, 100.0, 12.0, FreeCAD.Vector(0.0, 0.0, 0.0))
+        island = Part.makeBox(20.0, 20.0, 12.0, FreeCAD.Vector(40.0, 40.0, 0.0))
+        removal = stock.cut(island)
+        regions = sections.make_cut_regions(removal, [8.0, 4.0])
+        plan = entry.make_entry_plan(stock.BoundBox, "+Y", 10.0)
+
+        result = strict_raster.generate(
+            regions=regions,
+            stock_boundbox=stock.BoundBox,
+            tool_diameter=10.0,
+            stepover_percent=50.0,
+            cut_mode="Conventional",
+            angle_degrees=0.0,
+            entry_plan=plan,
+            clearance_height=18.0,
+            safe_height=22.0,
+            horiz_feed=500.0,
+            vert_feed=250.0,
+            horiz_rapid=1500.0,
+            vert_rapid=800.0,
+        )
+
+        errors = validation.validate_strategy_result(
+            result=result,
+            stock_boundbox=stock.BoundBox,
+            expected_cut_mode="Conventional",
+            tool_radius=5.0,
+            entry_clearance=plan.entry_clearance,
+            protected_regions=[],
+        )
+
+        self.assertGreater(len(result.commands), 0)
+        self.assertEqual(result.validation_errors, [])
+        self.assertEqual(errors, [])

@@ -380,7 +380,28 @@ class TestPathVolumeFaceMill(PathTestBase):
     def _cutting_moves(self, path):
         """Return cutting commands from a Path object."""
 
-        return [cmd for cmd in path.Commands if cmd.Name in ("G1", "G2", "G3")]
+        return [cmd for cmd in path.Commands if self._is_material_removing_command(cmd)]
+
+    @staticmethod
+    def _command_annotations(command):
+        """Return command annotations as a dict when available."""
+
+        try:
+            annotations = getattr(command, "Annotations", None)
+        except Exception:
+            return {}
+
+        if isinstance(annotations, dict):
+            return dict(annotations)
+        return {}
+
+    def _is_material_removing_command(self, command):
+        """Return True when a command represents a strict cutting move."""
+
+        annotations = self._command_annotations(command)
+        if "vfm_is_cutting" in annotations:
+            return bool(annotations["vfm_is_cutting"])
+        return command.Name in ("G1", "G2", "G3")
 
     def _cutting_points(self, commands):
         points = []
@@ -417,6 +438,75 @@ class TestPathVolumeFaceMill(PathTestBase):
                 continue
             ordered_levels.append(z)
         return ordered_levels
+
+    def _command_states(self, commands):
+        """Return modal before/after XYZ state for each command."""
+
+        states = []
+        x = None
+        y = None
+        z = None
+
+        for command in commands:
+            params = command.Parameters
+            state = {
+                "command": command,
+                "before_x": x,
+                "before_y": y,
+                "before_z": z,
+            }
+
+            if "X" in params:
+                x = float(params["X"])
+            if "Y" in params:
+                y = float(params["Y"])
+            if "Z" in params:
+                z = float(params["Z"])
+
+            state["after_x"] = x
+            state["after_y"] = y
+            state["after_z"] = z
+            states.append(state)
+
+        return states
+
+    def _xy_outside_boundbox(self, x, y, boundbox, tolerance=1e-6):
+        """Return whether XY lies strictly outside the stock extents."""
+
+        if x is None or y is None:
+            return False
+
+        return (
+            x < (boundbox.XMin - tolerance)
+            or x > (boundbox.XMax + tolerance)
+            or y < (boundbox.YMin - tolerance)
+            or y > (boundbox.YMax + tolerance)
+        )
+
+    def _downward_plunge_states(self, commands, tolerance=1e-6):
+        """Return Z-down G1 command states from a Path command sequence."""
+
+        plunges = []
+
+        for state in self._command_states(commands):
+            command = state["command"]
+            params = command.Parameters
+            if command.Name != "G1" or "Z" not in params:
+                continue
+
+            before_z = state["before_z"]
+            after_z = state["after_z"]
+
+            if before_z is None:
+                plunges.append(state)
+                continue
+
+            if after_z is None or after_z >= before_z - tolerance:
+                continue
+
+            plunges.append(state)
+
+        return plunges
 
     def _assert_has_z_level(self, z_levels, expected, tolerance=1e-5):
         self.assertTrue(
@@ -1141,6 +1231,15 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertEqual(len(self._cutting_moves(op.Path)), 0)
         self.assertTrue(op.removalshape.isNull())
 
+    def test_volume_face_mill_remaining_material_aborts(self):
+        _job, _model, op = self._create_operation(name="phase8_remaining_material_abort")
+        op.MaterialStateMode = "RemainingMaterial"
+
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        self.assertEqual(len(self._cutting_moves(op.Path)), 0)
+        self.assertTrue(op.removalshape.isNull())
+
     def test_material_state_mode_round_trip_preserves_persisted_value(self):
         _job, _model, op = self._create_operation(name="material_state_round_trip")
         op.MaterialStateMode = "RemainingMaterial"
@@ -1399,6 +1498,83 @@ class TestPathVolumeFaceMill(PathTestBase):
 
         self.assertEqual(len(self._cutting_moves(op.Path)), 0)
         self.assertTrue(op.removalshape.isNull())
+
+    def test_volume_face_mill_unsupported_strategy_aborts(self):
+        _job, _model, op = self._create_operation(name="phase8_unsupported_strategy")
+        op.CuttingStrategy = "SquareSpiral"
+
+        self.assertSuccessfulRecompute(self.doc, op)
+
+        self.assertEqual(len(self._cutting_moves(op.Path)), 0)
+        self.assertTrue(op.removalshape.isNull())
+
+    def test_volume_face_mill_uses_strict_raster_output(self):
+        job = self._make_stock_only_job()
+        _job, _model, op = self._create_operation(
+            name="phase8_strict_raster_output",
+            job=job,
+            model=job.Model,
+            step_down=5.0,
+        )
+
+        with mock.patch.object(
+            PathVolumeFaceMill.volume_face_mill_strict_raster,
+            "generate",
+            wraps=PathVolumeFaceMill.volume_face_mill_strict_raster.generate,
+        ) as strict_generate, mock.patch.object(
+            PathVolumeFaceMill.PathAreaOp.ObjectOp,
+            "opExecute",
+            side_effect=AssertionError("Phase 8 must not call PathAreaOp.ObjectOp.opExecute"),
+        ), mock.patch.object(
+            op.Proxy,
+            "_buildPathArea",
+            side_effect=AssertionError("Phase 8 must not call _buildPathArea"),
+        ), mock.patch.object(
+            op.Proxy,
+            "_build_path_for_depth_candidates",
+            side_effect=AssertionError("Phase 8 must not call _build_path_for_depth_candidates"),
+        ), mock.patch.object(
+            op.Proxy,
+            "_build_allowance_layer_paths",
+            side_effect=AssertionError("Phase 8 must not call _build_allowance_layer_paths"),
+        ):
+            op.touch()
+            self.assertSuccessfulRecompute(self.doc, op)
+
+        strict_generate.assert_called_once()
+        self.assertGreater(len(op.Path.Commands), 0)
+        self.assertGreater(len(op.Proxy.commandlist), 0)
+        self.assertEqual(op.CuttingStrategy, "StrictRaster")
+
+        stock_bb = job.Stock.Shape.BoundBox
+        plunge_states = self._downward_plunge_states(op.Path.Commands)
+        self.assertGreater(len(plunge_states), 0)
+        self.assertTrue(
+            any(
+                self._xy_outside_boundbox(
+                    plunge["before_x"],
+                    plunge["before_y"],
+                    stock_bb,
+                )
+                for plunge in plunge_states
+            )
+        )
+
+    def test_volume_face_mill_no_longer_uses_clearing_pattern_for_strategy(self):
+        for clearing_pattern in ("ZigZag", "Offset"):
+            with self.subTest(clearing_pattern=clearing_pattern):
+                _job, _model, op = self._create_operation(
+                    name=f"phase8_clearing_pattern_{clearing_pattern}",
+                    clearing_pattern=clearing_pattern,
+                    step_down=5.0,
+                )
+                op.CuttingStrategy = "StrictRaster"
+                self.assertSuccessfulRecompute(self.doc, op)
+
+                self.assertEqual(op.CuttingStrategy, "StrictRaster")
+                self.assertEqual(op.ClearingPattern, clearing_pattern)
+                self.assertGreater(len(op.Path.Commands), 0)
+                self.assertGreater(len(self._cutting_moves(op.Path)), 0)
 
     def test_cutting_strategy_live_change_reports_unsupported_strategy_once(self):
         _job, _model, op = self._create_operation(name="cutting_strategy_live_change_error")
@@ -2373,18 +2549,19 @@ class TestPathVolumeFaceMill(PathTestBase):
 
         with mock.patch.object(
             op.Proxy,
-            "_build_path_for_depth_candidates",
-            return_value=(None, None, None, []),
+            "_build_strict_cut_regions_from_allowance_layers",
+            return_value=[],
         ), mock.patch.object(
-            PathVolumeFaceMill.Path.Log,
-            "warning",
-        ) as warning_mock:
+            PathVolumeFaceMill.volume_face_mill_strict_raster,
+            "generate",
+            side_effect=AssertionError(
+                "Strict generator must not run when no allowance regions exist"
+            ),
+        ):
             self.assertSuccessfulRecompute(self.doc, op)
 
         self.assertEqual(len(self._cutting_moves(op.Path)), 0)
-        self.assertFalse(op.removalshape.isNull())
-        warning_mock.assert_called()
-        self.assertIn("Feature Allowance cutting sections", warning_mock.call_args[0][0])
+        self.assertTrue(op.removalshape.isNull())
 
     def test_allowance_keepout_construction_failure_aborts_safely(self):
         job, model = self._make_job_with_25mm_stock_above_model()
@@ -2450,22 +2627,20 @@ class TestPathVolumeFaceMill(PathTestBase):
 
         with mock.patch.object(
             op.Proxy,
-            "_effective_cut_depth",
-            return_value=None,
+            "_build_strict_cut_regions",
+            return_value=[],
         ), mock.patch.object(
-            PathVolumeFaceMill.Path.Log,
-            "warning",
-        ) as warning_mock:
+            PathVolumeFaceMill.volume_face_mill_strict_raster,
+            "generate",
+            side_effect=AssertionError(
+                "Strict generator must not run when no strict regions exist"
+            ),
+        ):
             op.touch()
             self.assertSuccessfulRecompute(self.doc, op)
 
         self.assertEqual(len(self._cutting_moves(op.Path)), 0)
-        self.assertFalse(op.removalshape.isNull())
-        warning_mock.assert_called()
-        self.assertIn(
-            "No realizable cutting sections found within the permitted depth range.",
-            warning_mock.call_args[0][0],
-        )
+        self.assertTrue(op.removalshape.isNull())
 
     def test_no_base_full_plate_without_clear_edges_keeps_final_pass_at_plate_top(self):
         model = self._make_full_plate_model()
@@ -3297,6 +3472,59 @@ class TestPathVolumeFaceMill(PathTestBase):
         self.assertLessEqual(max(z_levels), op.StartDepth.Value + 1e-6)
         self.assertLess(max(z_levels), op.StartDepth.Value - 1e-6)
         self._assert_has_z_level(z_levels, op.StartDepth.Value - op.StepDown.Value)
+
+    def test_volume_face_mill_each_layer_has_outside_entry(self):
+        job, model = self._make_job_with_25mm_stock_above_model()
+        _job, _model, op = self._create_operation(
+            name="phase8_each_layer_has_outside_entry",
+            job=job,
+            model=model,
+            step_down=5.0,
+        )
+
+        cutting_z_levels = self._cutting_z_levels(self._cutting_moves(op.Path))
+        plunge_states = self._downward_plunge_states(op.Path.Commands)
+        stock_bb = job.Stock.Shape.BoundBox
+
+        self.assertGreater(len(cutting_z_levels), 1)
+        self.assertGreater(len(plunge_states), 0)
+
+        for z_level in cutting_z_levels:
+            self.assertTrue(
+                any(
+                    abs(float(plunge["after_z"]) - float(z_level)) <= 1e-5
+                    and self._xy_outside_boundbox(
+                        plunge["before_x"],
+                        plunge["before_y"],
+                        stock_bb,
+                    )
+                    for plunge in plunge_states
+                ),
+                f"Expected an outside-stock plunge before cutting at Z={z_level}",
+            )
+
+    def test_volume_face_mill_does_not_plunge_inside_stock_before_cut(self):
+        job, model = self._make_job_with_25mm_stock_above_model()
+        _job, _model, op = self._create_operation(
+            name="phase8_no_internal_plunge",
+            job=job,
+            model=model,
+            step_down=5.0,
+        )
+
+        plunge_states = self._downward_plunge_states(op.Path.Commands)
+        stock_bb = job.Stock.Shape.BoundBox
+
+        self.assertGreater(len(plunge_states), 0)
+        for plunge in plunge_states:
+            self.assertTrue(
+                self._xy_outside_boundbox(
+                    plunge["before_x"],
+                    plunge["before_y"],
+                    stock_bb,
+                ),
+                f"Expected plunge before {plunge['command']} to stay outside stock XY extents.",
+            )
 
     def test_clear_edges_false_ignores_edge_clearance_values(self):
         job, _model, op = self._create_operation(name="edge_clearance_disabled")

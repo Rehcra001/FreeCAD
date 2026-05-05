@@ -455,6 +455,7 @@ SET(PathPythonBaseGenerator_SRCS
     Path/Base/Generator/volume_face_mill_validation.py
     Path/Base/Generator/volume_face_mill_sections.py
     Path/Base/Generator/volume_face_mill_entry.py
+    Path/Base/Generator/volume_face_mill_strict_raster.py
 )
 
 SET(PathPythonGui_SRCS

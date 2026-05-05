@@ -8,6 +8,9 @@ import Path.Op.Area as PathAreaOp
 import Path.Op.PocketBase as PathPocketBase
 import Path.Op.VolumeFaceMillUtils as VolumeFaceMillUtils
 import PathScripts.PathUtils as PathUtils
+from Path.Base.Generator import volume_face_mill_entry
+from Path.Base.Generator import volume_face_mill_sections
+from Path.Base.Generator import volume_face_mill_strict_raster
 
 from PySide.QtCore import QT_TRANSLATE_NOOP
 from lazy_loader.lazy_loader import LazyLoader
@@ -931,6 +934,105 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         VolumeFaceMillUtils.set_distance_property(obj, "ClearanceHeight", safe_height)
         return True
 
+    def _tool_diameter_value(self):
+        """Return the active tool diameter as a float."""
+
+        tool = getattr(self, "tool", None)
+        if tool is None:
+            return 0.0
+
+        try:
+            return float(tool.Diameter)
+        except Exception:
+            try:
+                return float(getattr(tool.Diameter, "Value", tool.Diameter))
+            except Exception:
+                return 0.0
+
+    def _entry_clearance_value(self, obj):
+        """Return effective entry clearance for strict Volume Face Mill output."""
+
+        tool_diameter = self._tool_diameter_value()
+        default_clearance = max(0.0, tool_diameter + 10.0)
+
+        if not hasattr(obj, "EntryClearance"):
+            return default_clearance
+
+        try:
+            user_value = float(getattr(obj.EntryClearance, "Value", obj.EntryClearance))
+        except Exception:
+            return default_clearance
+
+        return max(default_clearance, user_value)
+
+    def _stock_boundbox(self, obj):
+        """Return valid stock BoundBox or None."""
+
+        stock_shape = VolumeFaceMillUtils.get_stock_shape(obj)
+        if stock_shape is None:
+            return None
+        return stock_shape.BoundBox
+
+    def _build_strict_cut_regions(self, obj, removal_shape):
+        """Build CutRegion metadata from the safe removal volume."""
+
+        return volume_face_mill_sections.make_cut_regions(
+            removal_shape=removal_shape,
+            depthparams=self.depthparams,
+            start_depth=obj.StartDepth.Value,
+            final_depth=obj.FinalDepth.Value,
+        )
+
+    def _build_strict_cut_regions_from_allowance_layers(self, layer_volumes):
+        """Build CutRegion metadata from allowance layer volumes."""
+
+        return volume_face_mill_sections.make_cut_regions_from_layer_volumes(layer_volumes)
+
+    def _make_entry_plan(self, obj, stock_boundbox):
+        """Build the common outside-stock entry plan."""
+
+        entry_side = getattr(obj, "EntrySide", "Auto")
+        entry_clearance = self._entry_clearance_value(obj)
+
+        return volume_face_mill_entry.make_entry_plan(
+            stock_boundbox=stock_boundbox,
+            entry_side=entry_side,
+            entry_clearance=entry_clearance,
+        )
+
+    def _feeds_for_strategy(self):
+        """Return feed/rapid values used by the strict strategy generator."""
+
+        return {
+            "horiz_feed": self.horizFeed,
+            "vert_feed": self.vertFeed,
+            "horiz_rapid": self.horizRapid,
+            "vert_rapid": self.vertRapid,
+        }
+
+    def _emit_strategy_result(self, result):
+        """Copy strategy result Path.Commands into this operation."""
+
+        self.commandlist = []
+        self.commandlist.extend(result.commands or [])
+
+    def _abort_strategy_errors(self, obj, result):
+        """Abort with no path when strategy validation fails."""
+
+        message = translate(
+            "CAM_VolumeFaceMill",
+            "Volume Face Mill strict strategy validation failed.",
+        )
+        for error in result.validation_errors:
+            Path.Log.error(f"{message} {error}")
+
+        return self._abort_no_path(
+            obj,
+            message,
+            error=True,
+            preserve_removalshape=True,
+        )
+
     def _clamp_stepover(self, obj):
         """Clamp StepOver to the valid UI-supported percentage range."""
 
@@ -1333,11 +1435,23 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
         return None, None, None, []
 
     def opExecute(self, obj, getsim=False):
-        """Execute stock-driven volume face milling even without selected base geometry."""
+        """Execute strict stock-driven Volume Face Mill output."""
 
         Path.Log.track()
         self._force_compatibility_properties(obj)
         self._clamp_stepover(obj)
+
+        self.commandlist = []
+        self.endVector = None
+        self.leadIn = 2.0
+
+        if getsim:
+            Path.Log.warning(
+                translate(
+                    "CAM_VolumeFaceMill",
+                    "Volume Face Mill strict strategy simulation output is not implemented.",
+                )
+            )
 
         if not VolumeFaceMillUtils.has_valid_stock(obj):
             return self._abort_no_path(
@@ -1374,22 +1488,87 @@ class ObjectVolumeFaceMill(PathPocketBase.ObjectPocket):
                 error=True,
             )
 
-        if VolumeFaceMillUtils.feature_allowance_is_active(obj):
-            return self._build_allowance_layer_paths(obj, getsim)
-
-        self._pending_standard_abort = None
-        result = PathAreaOp.ObjectOp.opExecute(self, obj, getsim)
-        if self._pending_standard_abort is not None:
-            message, error, preserve_removalshape = self._pending_standard_abort
-            self._pending_standard_abort = None
+        if getattr(obj, "CuttingStrategy", "StrictRaster") != "StrictRaster":
             return self._abort_no_path(
                 obj,
-                message,
-                error=error,
-                preserve_removalshape=preserve_removalshape,
+                _unsupported_cutting_strategy_message(),
+                error=True,
             )
 
-        return result
+        stock_boundbox = self._stock_boundbox(obj)
+        if stock_boundbox is None:
+            return self._abort_no_path(
+                obj,
+                translate("CAM_VolumeFaceMill", "Volume Face Mill requires a valid Job stock."),
+                error=True,
+            )
+
+        self.depthparams = self._customDepthParams(
+            obj,
+            obj.StartDepth.Value,
+            obj.FinalDepth.Value,
+        )
+
+        removal_shape = None
+        cut_regions = []
+
+        if VolumeFaceMillUtils.feature_allowance_is_active(obj):
+            layer_volumes = VolumeFaceMillUtils.build_allowance_layer_volumes(
+                obj=obj,
+                model=self.model,
+                tool_radius=self.radius,
+                depthparams=self.depthparams,
+            )
+            if layer_volumes:
+                layer_shapes = [shape for _cut_depth_z, shape in layer_volumes]
+                removal_shape = (
+                    layer_shapes[0] if len(layer_shapes) == 1 else Part.makeCompound(layer_shapes)
+                )
+                cut_regions = self._build_strict_cut_regions_from_allowance_layers(layer_volumes)
+        else:
+            removal_shape = VolumeFaceMillUtils.build_removal_volume(
+                obj=obj,
+                model=self.model,
+                tool_radius=self.radius,
+                depthparams=self.depthparams,
+            )
+            if not VolumeFaceMillUtils.shape_is_empty(removal_shape):
+                cut_regions = self._build_strict_cut_regions(obj, removal_shape)
+
+        if VolumeFaceMillUtils.shape_is_empty(removal_shape) or not cut_regions:
+            obj.removalshape = Part.Shape()
+            return self._abort_no_path(
+                obj,
+                translate("CAM_VolumeFaceMill", "No machinable stock volume found."),
+                preserve_removalshape=True,
+            )
+
+        obj.removalshape = removal_shape
+
+        entry_plan = self._make_entry_plan(obj, stock_boundbox)
+        feeds = self._feeds_for_strategy()
+        tool_diameter = self._tool_diameter_value()
+
+        result = volume_face_mill_strict_raster.generate(
+            regions=cut_regions,
+            stock_boundbox=stock_boundbox,
+            tool_diameter=tool_diameter,
+            stepover_percent=float(obj.StepOver),
+            cut_mode=obj.CutMode,
+            angle_degrees=float(obj.Angle),
+            entry_plan=entry_plan,
+            clearance_height=obj.ClearanceHeight.Value,
+            safe_height=obj.SafeHeight.Value,
+            optimization_mode=obj.OptimizationMode,
+            protected_regions=[],
+            **feeds,
+        )
+
+        if result.validation_errors:
+            return self._abort_strategy_errors(obj, result)
+
+        self._emit_strategy_result(result)
+        return []
 
     def _customDepthParams(self, obj, strDep, finDep):
         """Keep stock-top StartDepth without injecting a stock-top cut pass."""
